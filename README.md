@@ -84,5 +84,5 @@ This project is licensed under the MIT License - see the [LICENSE](LICENSE) file
 
 **Developed with ❤️ by [Khaled]**  
 [![Portfolio](https://img.shields.io/badge/-My%20Portfolio-blue)](https://www.freelancer.com/u/k5602)
-[![LinkedIn](https://img.shields.io/badge/-LinkedIn-0077B5)](https://linkedin.com/in/(https://www.linkedin.com/in/khaled-mahmoud-b19210311/)
+[![LinkedIn](https://img.shields.io/badge/-LinkedIn-0077B5)](https://www.linkedin.com/in/khaled-mahmoud-b19210311/)
 ```
