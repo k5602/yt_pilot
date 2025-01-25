@@ -2,11 +2,6 @@ Here's a professional, well-structured README.md for your GitHub repository:
 
 ```markdown
 # YouTube Playlist Downloader 🎥➡️📁
-
-[![Python 3.9+]](https://img.shields.io/badge/python-3.9+-blue.svg)](https://www.python.org/downloads/)
-[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
-[![PyPI Version](https://img.shields.io/badge/pytube-15.0.0-red)](https://pypi.org/project/pytube/)
-
 A high-performance Python utility for downloading YouTube playlists with parallel downloads and quality selection. Perfect for content archivists, educators, and media enthusiasts.
 
 ## Key Features ✨
