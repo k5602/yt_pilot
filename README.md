@@ -6,12 +6,12 @@ A high-performance Python utility for downloading YouTube playlists with paralle
 
 ## Key Features ✨
 
-- ⚡ **Parallel Downloads** - Multi-threaded downloads with configurable workers
-- 📊 **Visual Progress** - Rich terminal interface with real-time progress tracking
-- 🎚️ **Quality Control** - Preset resolutions from 144p to 1080p
-- 🔊 **Audio Extraction** - MP4 audio-only download option
-- 🛡️ **Error Resilient** - Automatic retries and skip existing files
-- 📁 **Smart Organization** - Structured output with metadata preservation
+- ⚡ Parallel Downloads - Multi-threaded downloads with configurable workers
+- 📊 Visual Progress - Rich terminal interface with real-time progress tracking
+- 🎚️ Quality Control - Preset resolutions from 144p to 1080p
+- 🔊 Audio Extraction - MP4 audio-only download option
+- 🛡️ Error Resilient - Automatic retries and skip existing files
+- 📁 Smart Organization - Structured output with metadata preservation
 
 ## Installation 🛠️
 
