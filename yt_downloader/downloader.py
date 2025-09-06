@@ -139,7 +139,7 @@ class PlaylistDownloader:
             from rich import print as rprint
 
             rprint(f"[bold red]Fatal playlist error: {e}[/bold red]")
-        return results
+        return results  # session retained internally (future: return session)
 
     def download_video(
         self, video_url: str, audio_only: Optional[bool] = None

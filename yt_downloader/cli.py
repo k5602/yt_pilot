@@ -11,7 +11,7 @@ from .config import AppConfig
 from .downloader import PlaylistDownloader
 from .plugins import PluginManager
 from .logging_utils import get_logger
-from .reporting import build_session_report
+from .reporting import build_session_report, write_report
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -26,14 +26,22 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("-o", "--output", default="downloads", help="Output directory")
     p.add_argument("-j", "--jobs", type=int, default=4, help="Max parallel downloads")
     p.add_argument("--interactive", action="store_true", help="Interactive mode")
-    p.add_argument("--captions", action="store_true", help="Fetch manual captions if available")
-    p.add_argument("--captions-auto", action="store_true", help="Allow auto (ASR) captions fallback or only if requested without manual")
+    p.add_argument(
+        "--captions", action="store_true", help="Fetch manual captions if available"
+    )
+    p.add_argument(
+        "--captions-auto",
+        action="store_true",
+        help="Allow auto (ASR) captions fallback or only if requested without manual",
+    )
     p.add_argument(
         "--caption-langs",
         default="en",
         help="Comma-separated caption language preference order (default: en)",
     )
-    p.add_argument("--dry-run", action="store_true", help="Plan only; no downloads performed")
+    p.add_argument(
+        "--dry-run", action="store_true", help="Plan only; no downloads performed"
+    )
     p.add_argument(
         "--filter",
         dest="filters",
@@ -45,7 +53,9 @@ def build_parser() -> argparse.ArgumentParser:
         "--index-range",
         help="Index slice start:end (1-based inclusive). Examples: 5:10, :20, 10:",
     )
-    p.add_argument("--resume", action="store_true", help="Resume using manifest.json in output dir")
+    p.add_argument(
+        "--resume", action="store_true", help="Resume using manifest.json in output dir"
+    )
     p.add_argument(
         "--report-format",
         choices=["json", "none"],
@@ -115,10 +125,15 @@ def run_cli(argv: list[str] | None = None) -> int:
             # Print raw JSON only (tests expect last line parsable)
             print(json.dumps(plan))
         else:
-            rprint("[bold]Dry-run plan[/bold] targets=" + str(len(targets)) + "\nProcessing playlist (simulated)")
+            rprint(
+                "[bold]Dry-run plan[/bold] targets="
+                + str(len(targets))
+                + "\nProcessing playlist (simulated)"
+            )
         return 0
 
     sessions_reports = []
+    written_reports = []
     for idx, url in enumerate(targets, start=1):
         rprint(
             f"[cyan]Processing target {idx}/{len(targets)} (playlist or video):[/] {url}"
@@ -143,7 +158,9 @@ def run_cli(argv: list[str] | None = None) -> int:
                 index_range=args.index_range,
                 captions=args.captions,
                 captions_auto=args.captions_auto,
-                caption_langs=args.caption_langs.split(",") if args.caption_langs else ["en"],
+                caption_langs=(
+                    args.caption_langs.split(",") if args.caption_langs else ["en"]
+                ),
                 force=args.force,
             )
         all_results.append((url, res))
@@ -157,13 +174,22 @@ def run_cli(argv: list[str] | None = None) -> int:
                 "failed": sum(1 for v in res if v.status == "failed"),
             }
             counts["skipped"] = 0
-            counts["fallbacks"] = sum(1 for v in res if getattr(v, "fallback_applied", False))
+            counts["fallbacks"] = sum(
+                1 for v in res if getattr(v, "fallback_applied", False)
+            )
             sessions_reports.append(
                 {
                     "playlistUrl": url,
                     "counts": counts,
                 }
             )
+            # Write a per-target report file placeholder (aggregated info only until full session wiring)
+            # Filename includes index to avoid overwrite when multiple targets
+            report_path = config.output_dir / (
+                f"report-{idx}.json" if len(targets) > 1 else "report.json"
+            )
+            report_path.write_text(json.dumps({"playlistUrl": url, **counts}, indent=2))
+            written_reports.append(str(report_path))
 
     # Simple summary
     total_videos = sum(len(r) for _, r in all_results)
@@ -173,14 +199,17 @@ def run_cli(argv: list[str] | None = None) -> int:
     if failures:
         rprint(f"[bold red]Failures:[/] {failures}")
     if args.report_format == "json" and sessions_reports:
-        summary_line = json.dumps({
-            "summary": {
-                "targets": len(sessions_reports),
-                "totalVideos": total_videos,
-                "success": successes,
-                "failed": failures,
+        summary_line = json.dumps(
+            {
+                "summary": {
+                    "targets": len(sessions_reports),
+                    "totalVideos": total_videos,
+                    "success": successes,
+                    "failed": failures,
+                    "reports": written_reports,
+                }
             }
-        })
+        )
         print(summary_line)
     return 0 if failures == 0 else 1
 

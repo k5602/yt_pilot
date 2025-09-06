@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "yt-downloader"
-version = "0.1.0"
+version = "0.2.0"
 description = "Modular YouTube playlist downloader with captions, resume, dry-run, and reporting"
 authors = [{ name = "Khaled" }]
 readme = "README.md"
@@ -25,7 +25,7 @@ dependencies = [
 dev = ["pytest>=8.0.0", "jsonschema>=4.21.0"]
 
 [project.scripts]
-yt-downloader = "main:main"
+yt-downloader = "yt_downloader.cli:run_cli"
 
 [tool.setuptools.packages.find]
 where = ["."]

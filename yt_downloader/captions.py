@@ -57,16 +57,18 @@ class CaptionsService:
         # Attempt languages sequentially
         for lang in self.languages:
             try:
-                transcript = YouTubeTranscriptApi.get_transcript(video.video_id, languages=[lang])
+                transcript = YouTubeTranscriptApi.get_transcript(
+                    video.video_id, languages=[lang]
+                )
                 # Convert to a basic SRT-like format
                 lines = []
                 for i, entry in enumerate(transcript, start=1):
-                    start = entry['start']
-                    dur = entry.get('duration', 0)
+                    start = entry["start"]
+                    dur = entry.get("duration", 0)
                     end = start + dur
                     lines.append(str(i))
                     lines.append(f"{self._format_ts(start)} --> {self._format_ts(end)}")
-                    lines.append(entry['text'])
+                    lines.append(entry["text"])
                     lines.append("")
                 content = "\n".join(lines)
                 path = self._write_caption(video.video_id, lang, "auto", content)
@@ -83,7 +85,9 @@ class CaptionsService:
                 continue
         return None
 
-    def obtain(self, video: VideoItem, want_manual: bool, want_auto: bool) -> List[CaptionTrack]:
+    def obtain(
+        self, video: VideoItem, want_manual: bool, want_auto: bool
+    ) -> List[CaptionTrack]:
         tracks: List[CaptionTrack] = []
         if want_manual:
             manual = self.fetch_manual(video)

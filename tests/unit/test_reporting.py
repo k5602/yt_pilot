@@ -8,7 +8,7 @@ def make_session():
         playlist_url="pl",
         session_id="sid",
         started=datetime.utcnow(),
-        quality_order=["720p","480p"],
+        quality_order=["720p", "480p"],
         audio_only=False,
         config_snapshot={},
     )
@@ -22,14 +22,22 @@ def make_session():
     v3.status = "success"
     v3.selected_quality = "480p"
     v3.fallback_applied = True
-    s.videos.extend([v1,v2,v3])
+    s.videos.extend([v1, v2, v3])
     return s
 
 
 def test_build_session_report_shape():
     s = make_session()
     rep = build_session_report(s)
-    for key in ["schemaVersion","playlistUrl","sessionId","started","ended","qualityOrder","videos"]:
+    for key in [
+        "schemaVersion",
+        "playlistUrl",
+        "sessionId",
+        "started",
+        "ended",
+        "qualityOrder",
+        "videos",
+    ]:
         assert key in rep
     # failures and fallbacks lists
     assert len(rep["failures"]) == 1
