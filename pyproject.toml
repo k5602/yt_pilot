@@ -17,8 +17,8 @@ classifiers = [
 ]
 dependencies = [
     "pytube>=15.0.0",
-    "youtube-transcript-api>=0.6.2",
-    "rich>=13.7.0",
+    "youtube-transcript-api>=1.2.2",
+    "rich>=14.1.0",
 ]
 
 [project.optional-dependencies]
