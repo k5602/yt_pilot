@@ -1,15 +1,25 @@
-```markdown
-# YouTube Playlist Downloader 🎥➡️📁
-A high-performance Python utility for downloading YouTube playlists with parallel downloads and quality selection. Perfect for content archivists, educators, and media enthusiasts.
+# yt_pilot
 
-## Key Features ✨
+Modular YouTube Playlist Downloader supporting playlist batch operations, quality fallback, audio-only mode, interactive confirmations, and an extensible plugin hook system.
 
-- ⚡ Parallel Downloads - Multi-threaded downloads with configurable workers
-- 📊 Visual Progress - Rich terminal interface with real-time progress tracking
-- 🎚️ Quality Control - Preset resolutions from 144p to 1080p
-- 🔊 Audio Extraction - MP4 audio-only download option
-- 🛡️ Error Resilient - Automatic retries and skip existing files
-- 📁 Smart Organization - Structured output with metadata preservation
+## Current Core Features
+
+- Parallel downloads with configurable workers
+- Visual progress via rich progress bars
+- Quality preference & fallback order (1080p → 144p)
+- Audio-only extraction mode
+- Batch processing of multiple playlist URLs
+- Interactive confirmation mode (`--interactive`)
+- Simple plugin manager scaffold (post-playlist hooks)
+- Central logging utilities
+
+## Roadmap (See spec `specs/001-refactor-app-into/spec.md`)
+- Resume / session manifest
+- JSON & human-readable reports
+- Advanced interactive controls (skip, filter, quality adjust pre-start)
+- Filename templating & filtering
+- Configurable plugin auto-discovery
+- Dry-run analysis mode
 
 ## Installation 🛠️
 
@@ -26,24 +36,31 @@ pip install -r requirements.txt
 
 ## Usage 🚀
 
-### Basic Usage
+Entrypoint remains `main.py` for backwards compatibility.
+
+### Basic
 ```bash
-python yt_downloader.py "https://youtube.com/playlist?list=PL..." --output ./videos
+python main.py "https://youtube.com/playlist?list=PL..."
 ```
 
-### Download Audio Only
+### Multiple Playlists
 ```bash
-python yt_downloader.py "PLAYLIST_URL" --audio --output ./podcasts
+python main.py URL1 URL2 URL3 -q 1080p -j 8
 ```
 
-### High Quality Parallel Downloads
+### Audio Only
 ```bash
-python yt_downloader.py "PLAYLIST_URL" --quality 1080p --jobs 6
+python main.py URL -a
 ```
 
-### Full Help Menu
+### Interactive Confirmation
 ```bash
-python yt_downloader.py --help
+python main.py URL1 URL2 --interactive
+```
+
+### Help
+```bash
+python main.py --help
 ```
 
 ## Technical Implementation 💻
@@ -54,19 +71,18 @@ python yt_downloader.py --help
 - **rich** - Terminal formatting and progress
 - **concurrent.futures** - Parallel processing
 
-### Architecture
-```mermaid
-graph TD
-    A[CLI Input] --> B{Parse Arguments}
-    B --> C[Create Downloader]
-    C --> D[Fetch Playlist Metadata]
-    D --> E[Create Thread Pool]
-    E --> F[[Download Videos]]
-    F --> G[Progress Updates]
-    G --> H{Complete?}
-    H -->|Yes| I[Cleanup]
-    H -->|No| F
+### Package Structure
 ```
+yt_downloader/
+    config.py        # AppConfig dataclass
+    downloader.py    # Core playlist/video handling
+    cli.py           # CLI + interactive prompts
+    plugins.py       # Plugin protocol & manager
+    logging_utils.py # Logger setup
+    __init__.py      # Public exports
+```
+
+`main.py` delegates to `yt_downloader.cli.run_cli`.
 
 
 ## License 📄
@@ -75,7 +91,5 @@ This project is licensed under the MIT License - see the [LICENSE](LICENSE) file
 
 ---
 
-**Developed with ❤️ by [Khaled]**  
-[![Portfolio](https://img.shields.io/badge/-My%20Portfolio-blue)](https://www.freelancer.com/u/k5602)
-[![LinkedIn](https://img.shields.io/badge/-LinkedIn-0077B5)](https://www.linkedin.com/in/khaled-mahmoud-b19210311/)
-```
+**Developed with ❤️ by [Khaled]**
+
