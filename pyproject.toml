@@ -6,26 +6,23 @@ build-backend = "setuptools.build_meta"
 name = "yt-downloader"
 version = "0.1.0"
 description = "Modular YouTube playlist downloader with captions, resume, dry-run, and reporting"
-authors = [ { name = "Unknown" } ]
+authors = [{ name = "Khaled" }]
 readme = "README.md"
 license = { file = "LICENSE" }
 requires-python = ">=3.11"
 classifiers = [
     "Programming Language :: Python :: 3",
     "License :: OSI Approved :: MIT License",
-    "Operating System :: OS Independent"
+    "Operating System :: OS Independent",
 ]
 dependencies = [
     "pytube>=15.0.0",
     "youtube-transcript-api>=0.6.2",
-    "rich>=13.7.0"
+    "rich>=13.7.0",
 ]
 
 [project.optional-dependencies]
-dev = [
-    "pytest>=8.0.0",
-    "jsonschema>=4.21.0"
-]
+dev = ["pytest>=8.0.0", "jsonschema>=4.21.0"]
 
 [project.scripts]
 yt-downloader = "main:main"

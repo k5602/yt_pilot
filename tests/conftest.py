@@ -11,11 +11,13 @@ PROJECT_ROOT = Path(__file__).resolve().parent.parent
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
+
 @pytest.fixture()
 def temp_output_dir(tmp_path):
     d = tmp_path / "out"
     d.mkdir()
     return d
+
 
 @pytest.fixture()
 def sample_manifest_entry():
@@ -24,8 +26,9 @@ def sample_manifest_entry():
         "quality": "720p",
         "fallback": False,
         "retries": 0,
-        "filename": "000-sample.mp4"
+        "filename": "000-sample.mp4",
     }
+
 
 @pytest.fixture()
 def run_cli(monkeypatch):
@@ -36,11 +39,14 @@ def run_cli(monkeypatch):
 
     def _run(args):
         argv = ["python", *args]
-        monkeypatch.setattr(sys, 'argv', argv)
+        monkeypatch.setattr(sys, "argv", argv)
         stdout_buf = StringIO()
         stderr_buf = StringIO()
         code = 0
-        with contextlib.redirect_stdout(stdout_buf), contextlib.redirect_stderr(stderr_buf):
+        with (
+            contextlib.redirect_stdout(stdout_buf),
+            contextlib.redirect_stderr(stderr_buf),
+        ):
             try:
                 cli_main()
             except SystemExit as e:
