@@ -2,6 +2,8 @@
 
 Modular YouTube Playlist & Single Video Downloader supporting playlist batch operations, captions (manual + auto), resume via manifest, dry-run planning, reporting, quality fallback, audio-only mode, interactive confirmations, filtering, filename templating, and an extensible plugin hook system.
 
+**Built with yt-dlp** for reliable YouTube downloads and support for thousands of video sites.
+
 ## Features
 
 - Playlist & single video URLs (mixed targets)
@@ -18,6 +20,7 @@ Modular YouTube Playlist & Single Video Downloader supporting playlist batch ope
 - Filename templating (--naming-template)
 - Interactive confirmation (--interactive)
 - Plugin manager scaffold for post-processing
+- Powered by yt-dlp for robust YouTube API compatibility
 
 ## Installation
 

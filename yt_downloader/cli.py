@@ -198,6 +198,18 @@ def run_cli(argv: list[str] | None = None) -> int:
     rprint(f"[bold green]Completed[/] videos: {successes} / {total_videos}")
     if failures:
         rprint(f"[bold red]Failures:[/] {failures}")
+        # Detailed failure reasons
+        for url, res in all_results:
+            for v in res:
+                if v.status == "failed":
+                    reason = getattr(v, "failure_reason", "unknown")
+                    display_title = v.title
+                    if display_title.startswith("http"):
+                        vid_id = display_title.split("v=")[-1].split("&")[0]
+                        display_title = f"video:{vid_id}"
+                    rprint(
+                        f"  [red]- {display_title}[/red] ([dim]{url}[/dim]) -> {reason}"
+                    )
     if args.report_format == "json" and sessions_reports:
         summary_line = json.dumps(
             {
