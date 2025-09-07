@@ -1,80 +1,121 @@
-# YouTube Playlist Downloader 🎥➡️📁
+
+# YouTube  🎥➡️📁
 A high-performance Python utility for downloading YouTube playlists with parallel downloads and quality selection. Perfect for content archivists, educators, and media enthusiasts.
+Modular YouTube Playlist & Single Video Downloader supporting playlist batch operations, captions (manual + auto), resume via manifest, dry-run planning, reporting, quality fallback, audio-only mode, interactive confirmations, filtering, filename templating, and an extensible plugin hook system.
 
-## Key Features ✨
+**Built with yt-dlp** for reliable YouTube downloads and support for thousands of video sites.
 
-- ⚡ Parallel Downloads - Multi-threaded downloads with configurable workers
-- 📊 Visual Progress - Rich terminal interface with real-time progress tracking
-- 🎚️ Quality Control - Preset resolutions from 144p to 1080p
-- 🔊 Audio Extraction - MP4 audio-only download option
-- 🛡️ Error Resilient - Automatic retries and skip existing files
-- 📁 Smart Organization - Structured output with metadata preservation
+## Features
 
-## Installation 🛠️
+- Playlist & single video URLs (mixed targets)
+- Parallel downloads (--jobs)
+- Quality preference & fallback order
+- Audio-only extraction (-a / --audio)
+- Resume with manifest (--resume)
+- Force re-download (--force)
+- Dry-run planning (--dry-run) with optional JSON output (--report-format json)
+- JSON report summary output & structured logging
+- Captions: manual (--captions) + auto fallback (--captions-auto) with language preference (--caption-langs "en,es")
+- Title filtering (repeatable --filter substr)
+- Index slicing (--index-range start:end inclusive)
+- Filename templating (--naming-template)
+- Interactive confirmation (--interactive)
+- Plugin manager scaffold for post-processing
+- Powered by yt-dlp for robust YouTube API compatibility
 
-1. **Clone Repository**
+## Installation
+
 ```bash
-git clone https://github.com/yourusername/youtube-playlist-downloader.git
-cd youtube-playlist-downloader
+pip install .[dev]
 ```
 
-2. **Install Dependencies**
+Or build & install wheel:
+
 ```bash
-pip install -r requirements.txt
+python -m build
+pip install dist/yt_downloader-*.whl
 ```
 
-## Usage 🚀
+After installation a console script `yt-downloader` is available.
 
-### Basic Usage
+## CLI Usage
+
+yt-downloader URL [URL ...] [options]
 ```bash
-python yt_downloader.py "https://youtube.com/playlist?list=PL..." --output ./videos
+yt-downloader URL [URL ...] [options]
 ```
 
-### Download Audio Only
+### Common Options
+
+| Flag | Description |
+|------|-------------|
+| -q / --quality | Primary preferred quality (fallback chain auto-extends) |
+| -a / --audio | Audio-only mode |
+| -j / --jobs | Max parallel worker threads |
+| --dry-run | Plan only; no downloads |
+| --report-format json| Emit JSON session summary (dry-run prints plan JSON if also --dry-run) |
+| --filter SUBSTR | Case-insensitive title substring filter (repeatable OR) |
+| --index-range s:e | 1-based inclusive slice (e.g. 5:10, :20, 10:) |
+| --resume | Skip already successful items found in manifest.json |
+| --force | Re-download even if manifest marks success |
+| --captions | Download manual captions if available |
+| --captions-auto | Allow automatic (ASR) captions if manual missing (or when only auto desired) |
+| --caption-langs CSV | Preference order (default: en) |
+| --naming-template T | Filename pattern tokens: {index},{title},{quality},{video_id},{date},{audio_only} |
+| --interactive | Ask confirmation per target |
+
+### Examples
+
+Dry-run with JSON plan:
+yt-downloader --dry-run --report-format json "https://youtube.com/playlist?list=PL123" > plan.json
 ```bash
-python yt_downloader.py "PLAYLIST_URL" --audio --output ./podcasts
+yt-downloader --dry-run --report-format json "<https://youtube.com/playlist?list=PL123>" > plan.json
 ```
 
-### High Quality Parallel Downloads
+Download a single video with captions (manual then auto fallback):
+yt-downloader --captions --captions-auto "https://www.youtube.com/watch?v=VIDEO_ID"
 ```bash
-python yt_downloader.py "PLAYLIST_URL" --quality 1080p --jobs 6
+yt-downloader --captions --captions-auto "<https://www.youtube.com/watch?v=VIDEO_ID>"
 ```
 
-### Full Help Menu
+Playlist subset, filter titles containing "python" across indices 10–25, audio only:
+yt-downloader -a --filter python --index-range 10:25 "https://youtube.com/playlist?list=PL123"
 ```bash
-python yt_downloader.py --help
+yt-downloader -a --filter python --index-range 10:25 "<https://youtube.com/playlist?list=PL123>"
 ```
 
-## Technical Implementation 💻
-
-### Core Technologies
-- **Python 3.9+** - Type hinted codebase
-- **pytube** - YouTube content retrieval
-- **rich** - Terminal formatting and progress
-- **concurrent.futures** - Parallel processing
-
-### Architecture
-```mermaid
-graph TD
-    A[CLI Input] --> B{Parse Arguments}
-    B --> C[Create Downloader]
-    C --> D[Fetch Playlist Metadata]
-    D --> E[Create Thread Pool]
-    E --> F[[Download Videos]]
-    F --> G[Progress Updates]
-    G --> H{Complete?}
-    H -->|Yes| I[Cleanup]
-    H -->|No| F
+Force re-download ignoring previous successes:
+yt-downloader --force --resume "https://youtube.com/playlist?list=PL123"
+```bash
+yt-downloader --force --resume "<https://youtube.com/playlist?list=PL123>"
 ```
 
+Custom naming template:
+yt-downloader --naming-template "{index:03d}-{title}-{quality}" URL
+```bash
+yt-downloader --naming-template "{index:03d}-{title}-{quality}" URL
+```
 
-## License 📄
+## Reporting
 
-This project is licensed under the MIT License - see the [LICENSE](LICENSE) file for details.
+When `--report-format json` a final summary line is emitted to stdout as JSON:
+```json
+{"summary":{"targets":1,"totalVideos":12,"success":12,"failed":0}}
+```
+Integrations can parse this line for automation. Per-target lightweight report files are written to the output directory as `report.json` (single target) or `report-<n>.json` when multiple targets are processed.
+(Full detailed per-video report plumbing is prepared in `reporting.py`).
 
----
+## Architecture Overview
+See `docs/architecture.md` for module responsibilities.
+
+## Development
+
+Run tests:
+```bash
+pytest -q
+```
+
+## License
+MIT - see `LICENSE`.
 
 **Developed with ❤️ by [Khaled]**  
-[![Portfolio](https://img.shields.io/badge/-My%20Portfolio-blue)](https://www.freelancer.com/u/k5602)
-[![LinkedIn](https://img.shields.io/badge/-LinkedIn-0077B5)](https://www.linkedin.com/in/khaled-mahmoud-b19210311/)
-

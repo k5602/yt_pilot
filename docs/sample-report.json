@@ -1,0 +1,18 @@
+{
+  "schemaVersion": "1.0.0",
+  "playlistUrl": "https://example.com/playlist/demo",
+  "sessionId": "DEMO-SESSION",
+  "started": "2025-09-07T00:00:00Z",
+  "ended": "2025-09-07T00:05:00Z",
+  "qualityOrder": ["720p", "1080p", "480p", "360p"],
+  "configSnapshot": {"audioOnly": false},
+  "counts": {"total": 2, "success": 2, "failed": 0, "skipped": 0, "fallbacks": 1},
+  "failures": [],
+  "fallbacks": [
+    {"videoId": "vid2", "from": "1080p", "to": "720p"}
+  ],
+  "videos": [
+    {"videoId": "vid1", "title": "First Video", "status": "success", "quality": "720p", "fallback": false, "retries": 0, "sizeBytes": 12345678},
+    {"videoId": "vid2", "title": "Second Video", "status": "success", "quality": "720p", "fallback": true, "retries": 0, "sizeBytes": 21234567}
+  ]
+}
