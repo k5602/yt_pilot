@@ -29,11 +29,11 @@ Manifest entries track status per video id with basic metadata. On resume, exist
 
 ## Captions Strategy
 
-Manual captions (pytube) preferred. If unavailable and --captions-auto provided, attempt auto transcript via youtube-transcript-api. Stored tracks attach to VideoItem for future report enrichment.
+Manual captions (yt-dlp) preferred. If unavailable and --captions-auto provided, attempt auto transcript via youtube-transcript-api. Stored tracks attach to VideoItem for future report enrichment.
 
 ## Concurrency & Batching
 
-Downloader batches futures to limit memory and optional backpressure (batch size = concurrency * 2). Simplified thread-based approach.
+Downloader batches futures to limit memory and optional backpressure (batch size = concurrency \* 2). Simplified thread-based approach.
 
 ## Filename Templates
 

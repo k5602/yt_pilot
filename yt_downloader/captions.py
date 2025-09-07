@@ -14,7 +14,7 @@ except Exception:  # pragma: no cover
 class CaptionsService:
     """Fetch manual and/or auto captions for a video.
 
-    Manual captions are pulled via pytube's captions (if present). Auto captions
+    captions are pulled via yt-dlp's subtitles extraction (if present). Auto captions
     fallback uses youtube-transcript-api which hits YouTube transcript endpoints.
     """
 

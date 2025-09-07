@@ -17,6 +17,7 @@ from .naming import expand_template
 from .manifest import Manifest
 from .filtering import apply_filters
 from .captions import CaptionsService
+from .logging_utils import get_logger
 from uuid import uuid4
 from datetime import datetime
 
@@ -277,6 +278,13 @@ class PlaylistDownloader:
                 # Find best format based on preferences
                 selected_format = self._select_best_format(formats, audio_only)
                 if not selected_format:
+                    # Log available formats for debugging
+                    log = get_logger()
+                    log.warning(f"No suitable format found for {title}. Available formats:")
+                    for fmt in formats[:5]:  # Log first 5 formats
+                        log.warning(f"  Format {fmt.get('format_id')}: "
+                                  f"acodec={fmt.get('acodec')}, vcodec={fmt.get('vcodec')}, "
+                                  f"abr={fmt.get('abr')}, height={fmt.get('height')}")
                     return VideoResult(
                         url=url,
                         title=title,
@@ -288,10 +296,32 @@ class PlaylistDownloader:
                 download_opts = {
                     "quiet": True,
                     "no_warnings": True,
-                    "format": selected_format["format_id"],
                     "outtmpl": f"{output_path}/%(title)s.%(ext)s",
                     "progress_hooks": [self._yt_dlp_progress_hook],
                 }
+
+                if audio_only:
+                    # For audio-only, use yt-dlp's smart format selection and extract audio
+                    download_opts.update({
+                        "format": "bestaudio/best",
+                        "postprocessors": [{
+                            "key": "FFmpegExtractAudio",
+                            "preferredcodec": "mp3",
+                            "preferredquality": "192",
+                        }],
+                        "prefer_ffmpeg": True,
+                    })
+                else:
+                    # Use yt-dlp's smart selection that automatically merges video+audio if needed
+                    quality_height = self._quality_to_height(self.config.preferred())
+
+                    # Build format selector that prefers combined formats but falls back to merging
+                    format_selector = f"best[height<={quality_height}]/best"
+
+                    download_opts.update({
+                        "format": format_selector,
+                        "merge_output_format": "mp4",  # Ensure we get mp4 with both video and audio
+                    })
 
                 # Create progress task
                 filesize = selected_format.get("filesize") or selected_format.get(
@@ -359,49 +389,110 @@ class PlaylistDownloader:
         self, formats: List[Dict], audio_only: bool
     ) -> Optional[Dict]:
         """Select the best format based on quality preferences."""
+        log = get_logger()
+
         if audio_only:
-            # Find best audio format
-            audio_formats = [
+            log.debug(f"Selecting audio format from {len(formats)} available formats")
+
+            # Find dedicated audio-only formats first (no video stream)
+            audio_only_formats = [
                 f
                 for f in formats
-                if f.get("acodec") != "none" and f.get("vcodec") == "none"
+                if f.get("acodec") != "none" and f.get("vcodec") in ["none", None]
             ]
-            if not audio_formats:
-                # Fallback to formats with audio
-                audio_formats = [f for f in formats if f.get("acodec") != "none"]
+
+            log.debug(f"Found {len(audio_only_formats)} dedicated audio-only formats")
+
+            if audio_only_formats:
+                # Sort by audio bitrate (higher is better)
+                audio_only_formats.sort(key=lambda x: x.get("abr", 0) or 0, reverse=True)
+                selected = audio_only_formats[0]
+                log.debug(f"Selected audio-only format: {selected.get('format_id')} "
+                         f"(acodec={selected.get('acodec')}, abr={selected.get('abr')})")
+                return selected
+
+            # Fallback: find any format with audio (including video+audio formats)
+            audio_formats = [
+                f for f in formats
+                if f.get("acodec") not in ["none", None] and f.get("acodec")
+            ]
+
+            log.debug(f"Fallback: Found {len(audio_formats)} formats with audio")
 
             if audio_formats:
-                # Sort by quality (abr = audio bitrate)
-                audio_formats.sort(key=lambda x: x.get("abr", 0) or 0, reverse=True)
-                return audio_formats[0]
+                # Prefer formats with higher audio bitrate and no video when possible
+                audio_formats.sort(
+                    key=lambda x: (
+                        x.get("vcodec") in ["none", None],  # Prefer audio-only
+                        x.get("abr", 0) or 0  # Then by audio bitrate
+                    ),
+                    reverse=True
+                )
+                selected = audio_formats[0]
+                log.debug(f"Selected audio format: {selected.get('format_id')} "
+                         f"(acodec={selected.get('acodec')}, vcodec={selected.get('vcodec')}, "
+                         f"abr={selected.get('abr')})")
+                return selected
+
+            log.warning("No formats with audio found!")
         else:
-            # Find best video format matching quality preferences
+            # Find best video format with audio
             target_height = self._quality_to_height(self.config.preferred())
 
-            # Try to find exact match first
-            for format_item in formats:
-                if (
-                    format_item.get("height") == target_height
-                    and format_item.get("vcodec") != "none"
-                ):
-                    return format_item
+            log.debug(f"Selecting video format for {target_height}p from {len(formats)} available formats")
 
-            # Try fallback qualities
+            # First priority: combined formats with both video and audio at target quality
+            combined_formats = [
+                f for f in formats
+                if (f.get("height") == target_height
+                    and f.get("vcodec") not in ["none", None]
+                    and f.get("acodec") not in ["none", None])
+            ]
+
+            if combined_formats:
+                # Sort by filesize/quality indicators
+                combined_formats.sort(key=lambda x: x.get("tbr", 0) or 0, reverse=True)
+                selected = combined_formats[0]
+                log.debug(f"Selected combined format: {selected.get('format_id')} "
+                         f"(height={selected.get('height')}, has audio)")
+                return selected
+
+            # Second priority: try fallback qualities with audio
             for fallback_quality in self.config.quality_order[1:]:
                 fallback_height = self._quality_to_height(fallback_quality)
-                for format_item in formats:
-                    if (
-                        format_item.get("height") == fallback_height
-                        and format_item.get("vcodec") != "none"
-                    ):
-                        return format_item
+                combined_fallback = [
+                    f for f in formats
+                    if (f.get("height") == fallback_height
+                        and f.get("vcodec") not in ["none", None]
+                        and f.get("acodec") not in ["none", None])
+                ]
 
-            # Last resort: any video format
-            video_formats = [f for f in formats if f.get("vcodec") != "none"]
-            if video_formats:
-                # Sort by height descending
-                video_formats.sort(key=lambda x: x.get("height", 0) or 0, reverse=True)
-                return video_formats[0]
+                if combined_fallback:
+                    combined_fallback.sort(key=lambda x: x.get("tbr", 0) or 0, reverse=True)
+                    selected = combined_fallback[0]
+                    log.debug(f"Selected fallback combined format: {selected.get('format_id')} "
+                             f"(height={selected.get('height')}, has audio)")
+                    return selected
+
+            # Third priority: any combined format (ignore quality preference)
+            any_combined = [
+                f for f in formats
+                if (f.get("vcodec") not in ["none", None]
+                    and f.get("acodec") not in ["none", None]
+                    and f.get("height", 0) > 0)
+            ]
+
+            if any_combined:
+                # Sort by height descending, then by bitrate
+                any_combined.sort(key=lambda x: (x.get("height", 0) or 0, x.get("tbr", 0) or 0), reverse=True)
+                selected = any_combined[0]
+                log.debug(f"Selected any combined format: {selected.get('format_id')} "
+                         f"(height={selected.get('height')}, has audio)")
+                return selected
+
+            # Last resort: let yt-dlp handle merging by returning None
+            # This will trigger the smart format selection in download_opts
+            log.warning("No combined video+audio formats found, will use yt-dlp smart selection")
 
         return None
 
