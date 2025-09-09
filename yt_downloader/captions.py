@@ -26,6 +26,7 @@ class CaptionsService:
         """Fetch manual captions using yt-dlp."""
         try:
             import yt_dlp
+            import urllib.request
 
             ydl_opts = {
                 "quiet": True,
@@ -59,10 +60,9 @@ class CaptionsService:
                             ]  # fallback to first available
 
                         if best_sub:
-                            # Download the subtitle content
-                            sub_content = (
-                                ydl._opener.open(best_sub["url"]).read().decode("utf-8")
-                            )
+                            # Download the subtitle content using urllib instead of private _opener
+                            with urllib.request.urlopen(best_sub["url"]) as response:
+                                sub_content = response.read().decode("utf-8")
 
                             # Convert to SRT if needed
                             if best_sub.get("ext") == "vtt":
