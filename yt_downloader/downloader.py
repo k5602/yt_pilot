@@ -41,6 +41,9 @@ class PlaylistDownloader:
             DownloadColumn(),
             TimeRemainingColumn(),
         )
+        # Track last completed session + last selected format for enrichment
+        self.last_session: PlaylistSession | None = None
+        self._last_selected_format: dict | None = None
 
     def _normalize_video_url(self, url: str) -> str:
         # Strip time parameters & extra queries to stabilize requests
@@ -88,6 +91,8 @@ class PlaylistDownloader:
             audio_only=self.config.audio_only if audio_only is None else audio_only,
             config_snapshot=self.config.__dict__.copy(),
         )
+        # Expose session for incremental counting in worker callbacks
+        self.last_session = session
         results: List[VideoResult] = []
         effective_audio = session.audio_only
         try:
@@ -170,6 +175,13 @@ class PlaylistDownloader:
                         results.append(res)
             session.videos.extend(items)
             session.ended = datetime.utcnow()
+            # Backfill counts if incremental path was skipped (should rarely happen)
+            if session.counts["total"] == 0:
+                session.counts["total"] = len(results)
+                session.counts["success"] = sum(1 for r in results if r.status == "success")
+                session.counts["failed"] = sum(1 for r in results if r.status == "failed")
+                session.counts["skipped"] = 0
+                session.counts["fallbacks"] = sum(1 for r in results if r.fallback_applied)
             manifest.save()
         except Exception as e:  # broad catch
             from rich import print as rprint
@@ -222,6 +234,11 @@ class PlaylistDownloader:
             video.status = "success"
             video.selected_quality = vr.quality
             video.fallback_applied = vr.fallback_applied
+            # Capture size if available from last selected format
+            if getattr(self, "_last_selected_format", None):
+                sf = self._last_selected_format
+                if sf:
+                    video.size_bytes = sf.get("filesize") or sf.get("filesize_approx")
             # Create filename using naming template from config
             video.filename = expand_template(self.config.naming_template, video)
             if captions or captions_auto:
@@ -233,6 +250,18 @@ class PlaylistDownloader:
             video.status = "failed"
             video.failure_reason = vr.failure_reason
         manifest.update_video(video)
+        # Increment session counts (atomic per video result)
+        if getattr(self, "last_session", None):
+            sess = self.last_session
+            if video.status == "success":
+                sess.counts["success"] += 1
+            elif video.status == "failed":
+                sess.counts["failed"] += 1
+            elif video.status == "skipped":
+                sess.counts["skipped"] += 1
+            sess.counts["total"] += 1
+            if video.fallback_applied:
+                sess.counts["fallbacks"] += 1
         return vr
 
     # Internal helpers
@@ -251,6 +280,10 @@ class PlaylistDownloader:
                     "no_warnings": True,
                     "extract_flat": False,
                     "outtmpl": f"{output_path}/%(title)s.%(ext)s",
+                    # Built-in retry handling (simplifies outer logic)
+                    "retries": 3,
+                    "fragment_retries": 3,
+                    "skip_unavailable_fragments": True,
                 }
 
                 # Get video info first
@@ -275,33 +308,66 @@ class PlaylistDownloader:
                         failure_reason="No streams available",
                     )
 
-                # Find best format based on preferences
-                selected_format = self._select_best_format(formats, audio_only)
+                # Simplified in-process selection (delegates merging to format selector)
+                target_height = self._quality_to_height(self.config.preferred())
+                selected_format = None
+                if audio_only:
+                    afmts = [
+                        f for f in formats
+                        if f.get("acodec") not in ["none", None] and f.get("vcodec") in ["none", None]
+                    ]
+                    if afmts:
+                        afmts.sort(key=lambda f: f.get("abr") or 0, reverse=True)
+                        selected_format = afmts[0]
+                else:
+                    candidates = [
+                        f for f in formats
+                        if f.get("height") and f.get("height") <= target_height
+                        and f.get("vcodec") not in ["none", None]
+                        and f.get("acodec") not in ["none", None]
+                    ]
+                    if candidates:
+                        candidates.sort(key=lambda f: (f.get("height") or 0, f.get("tbr") or 0), reverse=True)
+                        selected_format = candidates[0]
+                    if not selected_format:
+                        combined = [
+                            f for f in formats
+                            if f.get("vcodec") not in ["none", None]
+                            and f.get("acodec") not in ["none", None]
+                            and f.get("height")
+                        ]
+                        if combined:
+                            combined.sort(key=lambda f: (f.get("height") or 0, f.get("tbr") or 0), reverse=True)
+                            selected_format = combined[0]
                 if not selected_format:
-                    # Log available formats for debugging
                     log = get_logger()
                     log.warning(f"No suitable format found for {title}. Available formats:")
-                    for fmt in formats[:5]:  # Log first 5 formats
-                        log.warning(f"  Format {fmt.get('format_id')}: "
-                                  f"acodec={fmt.get('acodec')}, vcodec={fmt.get('vcodec')}, "
-                                  f"abr={fmt.get('abr')}, height={fmt.get('height')}")
+                    for fmt in formats[:5]:
+                        log.warning(
+                            f"  Format {fmt.get('format_id')}: acodec={fmt.get('acodec')}, "
+                            f"vcodec={fmt.get('vcodec')}, abr={fmt.get('abr')}, height={fmt.get('height')}"
+                        )
                     return VideoResult(
                         url=url,
                         title=title,
                         status="failed",
                         failure_reason="No suitable format found",
                     )
+                # Stash for enrichment
+                self._last_selected_format = selected_format
 
-                # Set up download options
+                # Set up download options with smart format selector
                 download_opts = {
                     "quiet": True,
                     "no_warnings": True,
                     "outtmpl": f"{output_path}/%(title)s.%(ext)s",
                     "progress_hooks": [self._yt_dlp_progress_hook],
+                    "retries": 3,
+                    "fragment_retries": 3,
+                    "skip_unavailable_fragments": True,
                 }
 
                 if audio_only:
-                    # For audio-only, use yt-dlp's smart format selection and extract audio
                     download_opts.update({
                         "format": "bestaudio/best",
                         "postprocessors": [{
@@ -312,11 +378,10 @@ class PlaylistDownloader:
                         "prefer_ffmpeg": True,
                     })
                 else:
-                    # Use yt-dlp's smart selection that automatically merges video+audio if needed
                     quality_height = self._quality_to_height(self.config.preferred())
 
-                    # Build format selector that prefers combined formats but falls back to merging
-                    format_selector = f"best[height<={quality_height}]/best"
+                    # Prefer best video <= target + best audio, fallback to any best
+                    format_selector = f"bestvideo[height<={quality_height}]+bestaudio/best[height<={quality_height}]/best"
 
                     download_opts.update({
                         "format": format_selector,
@@ -342,7 +407,13 @@ class PlaylistDownloader:
 
                 # Determine quality and fallback status
                 quality = self._format_to_quality(selected_format, audio_only)
-                fallback_applied = quality != self.config.preferred() and not audio_only
+                target_height = self._quality_to_height(self.config.preferred())
+                fallback_applied = (
+                    not audio_only
+                    and isinstance(selected_format.get("height"), int)
+                    and selected_format.get("height") is not None
+                    and selected_format.get("height") < target_height
+                )
 
                 return VideoResult(
                     url=url,

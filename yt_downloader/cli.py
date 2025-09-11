@@ -72,6 +72,12 @@ def build_parser() -> argparse.ArgumentParser:
         default="{index:03d}-{title}",
         help="Filename template tokens: {index},{title},{quality},{video_id},{date},{audio_only}",
     )
+    p.add_argument(
+        "--sub-langs",
+        dest="sub_langs",
+        default=None,
+        help="Comma-separated subtitle languages overriding --caption-langs for manual subtitle download (e.g. en,es,fr)",
+    )
     return p
 
 
@@ -95,6 +101,12 @@ def run_cli(argv: list[str] | None = None) -> int:
         output_dir=args.output,
         interactive=args.interactive,
     )
+    # Effective caption/subtitle languages: --sub-langs overrides --caption-langs for manual subtitles
+    effective_caption_langs = (
+        args.sub_langs.split(",")
+        if args.sub_langs
+        else (args.caption_langs.split(",") if args.caption_langs else ["en"])
+    )
 
     log = get_logger()
     log.info("Starting session (interactive=%s)", config.interactive)
@@ -117,7 +129,8 @@ def run_cli(argv: list[str] | None = None) -> int:
             "captions": {
                 "manual": args.captions,
                 "auto": args.captions_auto,
-                "langs": args.caption_langs.split(",") if args.caption_langs else [],
+                "langs": effective_caption_langs,
+                "override": bool(args.sub_langs),
             },
             "namingTemplate": args.naming_template,
         }
@@ -158,37 +171,86 @@ def run_cli(argv: list[str] | None = None) -> int:
                 index_range=args.index_range,
                 captions=args.captions,
                 captions_auto=args.captions_auto,
-                caption_langs=(
-                    args.caption_langs.split(",") if args.caption_langs else ["en"]
-                ),
+                caption_langs=effective_caption_langs,
                 force=args.force,
             )
         all_results.append((url, res))
         plugin_manager.run_all({"playlist_url": url, "results": res})
-        # Build ad-hoc session-like summary for structured logging (placeholder until session object externally exposed)
+        # Full session / single-target reporting
         if args.report_format == "json":
-            # Minimal session dict (counts computed from res)
-            counts = {
-                "total": len(res),
-                "success": sum(1 for v in res if v.status == "success"),
-                "failed": sum(1 for v in res if v.status == "failed"),
-            }
-            counts["skipped"] = 0
-            counts["fallbacks"] = sum(
-                1 for v in res if getattr(v, "fallback_applied", False)
-            )
-            sessions_reports.append(
-                {
-                    "playlistUrl": url,
-                    "counts": counts,
+            if downloader.last_session and len(res) > 0 and len(res) >= 1 and any(
+                v for v in res
+            ):
+                # Use the real playlist session produced by downloader (playlist path)
+                session = downloader.last_session
+                # Ensure ended timestamp
+                if session and session.ended is None:
+                    from datetime import datetime as _dt
+                    session.ended = _dt.utcnow()
+                session_report = build_session_report(session)
+                counts = session_report.get("counts", {})
+            else:
+                # Synthetic single-video session report
+                from datetime import datetime as _dt
+                vid_entries = []
+                fallbacks = []
+                failures = []
+                for v in res:
+                    vid_entries.append(
+                        {
+                            "videoId": getattr(v, "url", "unknown").split("v=")[-1][:11],
+                            "title": v.title,
+                            "status": v.status,
+                            "quality": getattr(v, "quality", None),
+                            "fallback": getattr(v, "fallback_applied", False),
+                            "retries": 0,
+                            "sizeBytes": None,
+                        }
+                    )
+                    if getattr(v, "fallback_applied", False):
+                        fallbacks.append(
+                            {
+                                "videoId": vid_entries[-1]["videoId"],
+                                "from": config.quality_order[0],
+                                "to": getattr(v, "quality", None),
+                            }
+                        )
+                    if v.status == "failed":
+                        failures.append(
+                            {
+                                "videoId": vid_entries[-1]["videoId"],
+                                "reason": getattr(v, "failure_reason", "unknown"),
+                            }
+                        )
+                counts = {
+                    "total": len(res),
+                    "success": sum(1 for v in res if v.status == "success"),
+                    "failed": sum(1 for v in res if v.status == "failed"),
+                    "skipped": 0,
+                    "fallbacks": sum(
+                        1 for v in res if getattr(v, "fallback_applied", False)
+                    ),
                 }
-            )
-            # Write a per-target report file placeholder (aggregated info only until full session wiring)
-            # Filename includes index to avoid overwrite when multiple targets
+                session_report = {
+                    "schemaVersion": "1.0.0",
+                    "playlistUrl": url,
+                    "sessionId": f"single-{idx}",
+                    "started": datetime.utcnow().isoformat(),
+                    "ended": datetime.utcnow().isoformat(),
+                    "qualityOrder": config.quality_order,
+                    "configSnapshot": config.__dict__,
+                    "counts": counts,
+                    "failures": failures,
+                    "fallbacks": fallbacks,
+                    "videos": vid_entries,
+                }
+            # Append lightweight summary for aggregate summary output
+            sessions_reports.append({"playlistUrl": url, "counts": counts})
+            # Determine per-target report path
             report_path = config.output_dir / (
                 f"report-{idx}.json" if len(targets) > 1 else "report.json"
             )
-            report_path.write_text(json.dumps({"playlistUrl": url, **counts}, indent=2))
+            report_path.write_text(json.dumps(session_report, indent=2))
             written_reports.append(str(report_path))
 
     # Simple summary
