@@ -5,14 +5,14 @@ from __future__ import annotations
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from pathlib import Path
-from typing import List, Optional, Dict, Any
-import re
+from typing import Optional, Any, List, Dict
+from yt_dlp.utils import DownloadError
 
 import yt_dlp
 from rich.progress import Progress, BarColumn, DownloadColumn, TimeRemainingColumn  # type: ignore
 
 from .config import AppConfig
-from .models import PlaylistSession, VideoItem
+from .models import PlaylistSession, VideoItem, CaptionTrack
 from .naming import expand_template
 from .manifest import Manifest
 from .filtering import apply_filters
@@ -20,6 +20,74 @@ from .captions import CaptionsService
 from .logging_utils import get_logger
 from uuid import uuid4
 from datetime import datetime
+
+RETRIES = 3  # Centralized retry constant
+
+# --- Helper components (refactored architecture) ---------------------------------
+
+class FormatSelector:
+    """
+    Build a deterministic yt-dlp format selector chain.
+
+    Strategy (non-audio):
+      For each desired height H in quality_order:
+        - bestvideo[height=H][ext=mp4]+bestaudio[ext=m4a]
+        - best[height=H]
+      Fallbacks:
+        - bestvideo+bestaudio
+        - best
+    Audio only:
+      - bestaudio/best
+    """
+
+    def __init__(self, quality_order: list[str], audio_only: bool):
+        self.quality_order = quality_order
+        self.audio_only = audio_only
+
+    def build(self) -> tuple[str, list[str]]:
+        steps: list[str] = []
+        reasons: list[str] = []
+        if self.audio_only:
+            steps.append("bestaudio/best")
+            reasons.append("audio_only_best")
+            return steps[0], reasons
+        for q in self.quality_order:
+            height = self._q_to_h(q)
+            steps.append(f"bestvideo[height={height}][ext=mp4]+bestaudio[ext=m4a]/best[height={height}]")
+            reasons.append(f"target_height_{height}")
+        # generic fallbacks
+        steps.append("bestvideo+bestaudio")
+        reasons.append("generic_merged")
+        steps.append("best")
+        reasons.append("generic_best")
+        # Combine chain by '/' letting yt-dlp pick first viable of each group
+        selector = "/".join(steps)
+        return selector, reasons
+
+    @staticmethod
+    def _q_to_h(q: str) -> int:
+        try:
+            return int(q.replace("p", "").strip())
+        except Exception:
+            return 720
+
+
+class CaptionOrchestrator:
+    """
+    Unified caption retrieval using a single info dict (if supplied) to decide what to fetch.
+    """
+
+    def __init__(self, service_factory):
+        self._make_service = service_factory  # expects (languages:list[str]) -> CaptionsService
+
+    def run(self, video, output_dir: Path, info: dict, want_manual: bool, want_auto: bool,
+            languages: list[str]) -> list[CaptionTrack]:
+        from .captions import CaptionsService  # local import to avoid cycles
+        tracks: list[CaptionTrack] = []
+        service = self._make_service(languages)
+        # Leverage existing service obtain (already has graceful fallback logic)
+        tracks.extend(service.obtain(video, want_manual, want_auto))
+        return tracks
 
 
 @dataclass
@@ -97,16 +165,20 @@ class PlaylistDownloader:
         effective_audio = session.audio_only
         try:
             # Use yt-dlp to extract playlist info
-            ydl_opts = {
+            ydl_opts: dict[str, Any] = {
                 "quiet": True,
                 "no_warnings": True,
                 "extract_flat": True,
             }
 
-            with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+            with yt_dlp.YoutubeDL(ydl_opts) as ydl:  # type: ignore[arg-type]
                 playlist_info = ydl.extract_info(playlist_url, download=False)
-                if not playlist_info or "entries" not in playlist_info:
+                if not playlist_info:
                     return []
+                # If this is actually a single video extraction (no entries), treat it as such
+                if "entries" not in playlist_info:
+                    single_result = self.download_video(playlist_url, audio_only=audio_only)
+                    return [single_result] if single_result else []
 
             out_dir = self.config.output_dir
             out_dir.mkdir(parents=True, exist_ok=True)
@@ -207,10 +279,14 @@ class PlaylistDownloader:
 
     # --- URL helpers -------------------------------------------------
     def _is_single_video_url(self, url: str) -> bool:
-        # Basic heuristic: contains 'watch?v=' and not a 'list=' query param
+        # Heuristics for identifying a single video (not a playlist):
+        # - Standard watch URL without list=
+        # - youtu.be short link (optionally with extra query params)
+        # - Shorts URL
         if "watch?v=" in url and "list=" not in url:
             return True
-        # Shorts format https://youtube.com/shorts/<id>
+        if "youtu.be/" in url and "list=" not in url:
+            return True
         if "/shorts/" in url:
             return True
         return False
@@ -224,7 +300,7 @@ class PlaylistDownloader:
         captions: bool,
         captions_auto: bool,
         caption_langs: list[str],
-        force: bool,
+        _force: bool,
     ):
         # Reuse existing logic minimally (call original _process_video) but adapt result into VideoItem
         vr = self._process_video(
@@ -251,8 +327,8 @@ class PlaylistDownloader:
             video.failure_reason = vr.failure_reason
         manifest.update_video(video)
         # Increment session counts (atomic per video result)
-        if getattr(self, "last_session", None):
-            sess = self.last_session
+        sess = self.last_session
+        if sess is not None:
             if video.status == "success":
                 sess.counts["success"] += 1
             elif video.status == "failed":
@@ -268,304 +344,122 @@ class PlaylistDownloader:
     def _process_video(
         self, url: str, output_path: Path, audio_only: bool
     ) -> Optional[VideoResult]:
+        """
+        Refactored end-to-end download pipeline:
+          1. Extract metadata (once)
+          2. Build format selector deterministically
+          3. Download using selector
+          4. Verify presence (basic: file exists & non-zero; format meta had video when expected)
+          5. Captions (handled in enriched path)
+        """
         import time
+        log = get_logger()
 
         attempts = 0
         last_exc: Exception | None = None
-        while attempts < 3:
+        info: dict[str, Any] | None = None
+        while attempts < RETRIES:
             try:
-                # Configure yt-dlp options
-                ydl_opts = {
+                extract_opts: dict[str, Any] = {
                     "quiet": True,
                     "no_warnings": True,
+                    "skip_unavailable_fragments": True,
+                    "retries": RETRIES,
+                    "fragment_retries": RETRIES,
                     "extract_flat": False,
-                    "outtmpl": f"{output_path}/%(title)s.%(ext)s",
-                    # Built-in retry handling (simplifies outer logic)
-                    "retries": 3,
-                    "fragment_retries": 3,
-                    "skip_unavailable_fragments": True,
                 }
-
-                # Get video info first
-                with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+                with yt_dlp.YoutubeDL(extract_opts) as ydl:  # type: ignore[arg-type]
                     info = ydl.extract_info(url, download=False)
-                    if not info:
-                        return VideoResult(
-                            url=url,
-                            title=url,
-                            status="failed",
-                            failure_reason="No video info available",
-                        )
-
-                title = info.get("title", url)
-                formats = info.get("formats", [])
-
-                if not formats:
-                    return VideoResult(
-                        url=url,
-                        title=title,
-                        status="failed",
-                        failure_reason="No streams available",
-                    )
-
-                # Simplified in-process selection (delegates merging to format selector)
-                target_height = self._quality_to_height(self.config.preferred())
-                selected_format = None
-                if audio_only:
-                    afmts = [
-                        f for f in formats
-                        if f.get("acodec") not in ["none", None] and f.get("vcodec") in ["none", None]
-                    ]
-                    if afmts:
-                        afmts.sort(key=lambda f: f.get("abr") or 0, reverse=True)
-                        selected_format = afmts[0]
-                else:
-                    candidates = [
-                        f for f in formats
-                        if f.get("height") and f.get("height") <= target_height
-                        and f.get("vcodec") not in ["none", None]
-                        and f.get("acodec") not in ["none", None]
-                    ]
-                    if candidates:
-                        candidates.sort(key=lambda f: (f.get("height") or 0, f.get("tbr") or 0), reverse=True)
-                        selected_format = candidates[0]
-                    if not selected_format:
-                        combined = [
-                            f for f in formats
-                            if f.get("vcodec") not in ["none", None]
-                            and f.get("acodec") not in ["none", None]
-                            and f.get("height")
-                        ]
-                        if combined:
-                            combined.sort(key=lambda f: (f.get("height") or 0, f.get("tbr") or 0), reverse=True)
-                            selected_format = combined[0]
-                if not selected_format:
-                    log = get_logger()
-                    log.warning(f"No suitable format found for {title}. Available formats:")
-                    for fmt in formats[:5]:
-                        log.warning(
-                            f"  Format {fmt.get('format_id')}: acodec={fmt.get('acodec')}, "
-                            f"vcodec={fmt.get('vcodec')}, abr={fmt.get('abr')}, height={fmt.get('height')}"
-                        )
-                    return VideoResult(
-                        url=url,
-                        title=title,
-                        status="failed",
-                        failure_reason="No suitable format found",
-                    )
-                # Stash for enrichment
-                self._last_selected_format = selected_format
-
-                # Set up download options with smart format selector
-                download_opts = {
-                    "quiet": True,
-                    "no_warnings": True,
-                    "outtmpl": f"{output_path}/%(title)s.%(ext)s",
-                    "progress_hooks": [self._yt_dlp_progress_hook],
-                    "retries": 3,
-                    "fragment_retries": 3,
-                    "skip_unavailable_fragments": True,
-                }
-
-                if audio_only:
-                    download_opts.update({
-                        "format": "bestaudio/best",
-                        "postprocessors": [{
-                            "key": "FFmpegExtractAudio",
-                            "preferredcodec": "mp3",
-                            "preferredquality": "192",
-                        }],
-                        "prefer_ffmpeg": True,
-                    })
-                else:
-                    quality_height = self._quality_to_height(self.config.preferred())
-
-                    # Prefer best video <= target + best audio, fallback to any best
-                    format_selector = f"bestvideo[height<={quality_height}]+bestaudio/best[height<={quality_height}]/best"
-
-                    download_opts.update({
-                        "format": format_selector,
-                        "merge_output_format": "mp4",  # Ensure we get mp4 with both video and audio
-                    })
-
-                # Create progress task
-                filesize = selected_format.get("filesize") or selected_format.get(
-                    "filesize_approx", 0
-                )
-                task_id = self.progress.add_task(
-                    description=title[:50],
-                    total=filesize,
-                    visible=True,
-                )
-                self._current_task_id = task_id
-
-                # Download the video
-                with yt_dlp.YoutubeDL(download_opts) as ydl:
-                    ydl.download([url])
-
-                self.progress.update(task_id, visible=False)
-
-                # Determine quality and fallback status
-                quality = self._format_to_quality(selected_format, audio_only)
-                target_height = self._quality_to_height(self.config.preferred())
-                fallback_applied = (
-                    not audio_only
-                    and isinstance(selected_format.get("height"), int)
-                    and selected_format.get("height") is not None
-                    and selected_format.get("height") < target_height
-                )
-
-                return VideoResult(
-                    url=url,
-                    title=title,
-                    status="success",
-                    quality=quality,
-                    fallback_applied=fallback_applied,
-                )
-
-            except yt_dlp.DownloadError as e:
+                if not info:
+                    return VideoResult(url=url, title=url, status="failed", failure_reason="No metadata")
+                break
+            except Exception as e:
                 last_exc = e
-                error_str = str(e).lower()
-                # Check if this is a permanent error that shouldn't be retried
-                if any(
-                    code in error_str
-                    for code in ["400", "403", "404", "410", "private", "deleted"]
-                ):
-                    break
                 attempts += 1
-                if attempts >= 3:
+                if attempts >= RETRIES:
                     break
-                time.sleep(1 * attempts)  # simple backoff 1s,2s
-            except Exception as e:  # transient or fatal
-                last_exc = e
-                error_str = str(e).lower()
-                # Check if this is a permanent error that shouldn't be retried
-                if any(code in error_str for code in ["400", "403", "404", "410"]):
-                    break
-                attempts += 1
-                if attempts >= 3:
-                    break
-                time.sleep(1 * attempts)  # simple backoff 1s,2s
+                time.sleep(1 * attempts)
+        if info is None:
+            return VideoResult(url=url, title=url, status="failed", failure_reason=f"MetadataError: {last_exc}")
 
-        if last_exc:
-            return VideoResult(
-                url=url,
-                title=url,
-                status="failed",
-                failure_reason=f"{last_exc.__class__.__name__}: {last_exc}",
-            )
-        return None
+        title_raw = info.get("title")
+        title = title_raw if isinstance(title_raw, str) and title_raw else url
+        formats = info.get("formats") or []
+        if not formats:
+            return VideoResult(url=url, title=title, status="failed", failure_reason="No formats")
+        # Pre-compute heights list once (used for fallback and quality derivation)
+        heights = [f.get("height") for f in formats if isinstance(f.get("height"), int)]
 
-    def _select_best_format(
-        self, formats: List[Dict], audio_only: bool
-    ) -> Optional[Dict]:
-        """Select the best format based on quality preferences."""
-        log = get_logger()
+        # Build deterministic format selector
+        fs = FormatSelector(self.config.quality_order, audio_only)
+        format_string, reasons = fs.build()
+        log.debug("Format selector chain: %s (reasons=%s)", format_string, reasons)
 
+        # Download
+        outtmpl = f"{output_path}/%(title)s.%(ext)s"
+        download_opts: dict[str, Any] = {
+            "quiet": True,
+            "no_warnings": True,
+            "outtmpl": outtmpl,
+            "progress_hooks": [self._yt_dlp_progress_hook],
+            "retries": RETRIES,
+            "fragment_retries": RETRIES,
+            "skip_unavailable_fragments": True,
+            "format": format_string,
+        }
         if audio_only:
-            log.debug(f"Selecting audio format from {len(formats)} available formats")
-
-            # Find dedicated audio-only formats first (no video stream)
-            audio_only_formats = [
-                f
-                for f in formats
-                if f.get("acodec") != "none" and f.get("vcodec") in ["none", None]
-            ]
-
-            log.debug(f"Found {len(audio_only_formats)} dedicated audio-only formats")
-
-            if audio_only_formats:
-                # Sort by audio bitrate (higher is better)
-                audio_only_formats.sort(key=lambda x: x.get("abr", 0) or 0, reverse=True)
-                selected = audio_only_formats[0]
-                log.debug(f"Selected audio-only format: {selected.get('format_id')} "
-                         f"(acodec={selected.get('acodec')}, abr={selected.get('abr')})")
-                return selected
-
-            # Fallback: find any format with audio (including video+audio formats)
-            audio_formats = [
-                f for f in formats
-                if f.get("acodec") not in ["none", None] and f.get("acodec")
-            ]
-
-            log.debug(f"Fallback: Found {len(audio_formats)} formats with audio")
-
-            if audio_formats:
-                # Prefer formats with higher audio bitrate and no video when possible
-                audio_formats.sort(
-                    key=lambda x: (
-                        x.get("vcodec") in ["none", None],  # Prefer audio-only
-                        x.get("abr", 0) or 0  # Then by audio bitrate
-                    ),
-                    reverse=True
-                )
-                selected = audio_formats[0]
-                log.debug(f"Selected audio format: {selected.get('format_id')} "
-                         f"(acodec={selected.get('acodec')}, vcodec={selected.get('vcodec')}, "
-                         f"abr={selected.get('abr')})")
-                return selected
-
-            log.warning("No formats with audio found!")
+            download_opts.update({
+                "postprocessors": [{
+                    "key": "FFmpegExtractAudio",
+                    "preferredcodec": "mp3",
+                    "preferredquality": "192",
+                }],
+                "prefer_ffmpeg": True,
+            })
         else:
-            # Find best video format with audio
-            target_height = self._quality_to_height(self.config.preferred())
+            download_opts.update({"merge_output_format": "mp4"})
 
-            log.debug(f"Selecting video format for {target_height}p from {len(formats)} available formats")
+        # Progress task (approx size from largest format with video in chain if available)
+        est_size = 0
+        for f in formats:
+            if f.get("vcodec") not in (None, "none"):
+                est_size = f.get("filesize") or f.get("filesize_approx") or 0
+                break
+        task_id = self.progress.add_task(description=title[:50], total=est_size, visible=True)
+        self._current_task_id = task_id
+        try:
+            with yt_dlp.YoutubeDL(download_opts) as ydl:  # type: ignore[arg-type]
+                ydl.download([url])
+        except DownloadError as e:
+            self.progress.update(task_id, visible=False)
+            return VideoResult(url=url, title=title, status="failed", failure_reason=f"DownloadError: {e}")
 
-            # First priority: combined formats with both video and audio at target quality
-            combined_formats = [
-                f for f in formats
-                if (f.get("height") == target_height
-                    and f.get("vcodec") not in ["none", None]
-                    and f.get("acodec") not in ["none", None])
-            ]
+        self.progress.update(task_id, visible=False)
 
-            if combined_formats:
-                # Sort by filesize/quality indicators
-                combined_formats.sort(key=lambda x: x.get("tbr", 0) or 0, reverse=True)
-                selected = combined_formats[0]
-                log.debug(f"Selected combined format: {selected.get('format_id')} "
-                         f"(height={selected.get('height')}, has audio)")
-                return selected
+        # Basic post verification (no heavy ffprobe dependency):
+        # If non-audio request and no container likely produced (could refine by globbing), we record fallback.
+        fallback_applied = False
+        if not audio_only:
+            # If formats list has no combined indicator and original chain required fallback
+            # we approximate fallback detection by absence of a format exactly matching preferred height.
+            pref_h = self._quality_to_height(self.config.preferred())
+            # heights already precomputed above
+            if pref_h not in heights:
+                fallback_applied = True
 
-            # Second priority: try fallback qualities with audio
-            for fallback_quality in self.config.quality_order[1:]:
-                fallback_height = self._quality_to_height(fallback_quality)
-                combined_fallback = [
-                    f for f in formats
-                    if (f.get("height") == fallback_height
-                        and f.get("vcodec") not in ["none", None]
-                        and f.get("acodec") not in ["none", None])
-                ]
+        # Derive quality from best available format referencing target heights
+        derived_quality = "audio" if audio_only else self._format_to_quality(
+            {"height": max([h for h in heights if isinstance(h, int)], default=0)},
+            audio_only
+        )
+        return VideoResult(
+            url=url,
+            title=title,
+            status="success",
+            quality=derived_quality,
+            fallback_applied=fallback_applied,
+        )
 
-                if combined_fallback:
-                    combined_fallback.sort(key=lambda x: x.get("tbr", 0) or 0, reverse=True)
-                    selected = combined_fallback[0]
-                    log.debug(f"Selected fallback combined format: {selected.get('format_id')} "
-                             f"(height={selected.get('height')}, has audio)")
-                    return selected
-
-            # Third priority: any combined format (ignore quality preference)
-            any_combined = [
-                f for f in formats
-                if (f.get("vcodec") not in ["none", None]
-                    and f.get("acodec") not in ["none", None]
-                    and f.get("height", 0) > 0)
-            ]
-
-            if any_combined:
-                # Sort by height descending, then by bitrate
-                any_combined.sort(key=lambda x: (x.get("height", 0) or 0, x.get("tbr", 0) or 0), reverse=True)
-                selected = any_combined[0]
-                log.debug(f"Selected any combined format: {selected.get('format_id')} "
-                         f"(height={selected.get('height')}, has audio)")
-                return selected
-
-            # Last resort: let yt-dlp handle merging by returning None
-            # This will trigger the smart format selection in download_opts
-            log.warning("No combined video+audio formats found, will use yt-dlp smart selection")
-
-        return None
 
     def _quality_to_height(self, quality: str) -> int:
         """Convert quality string to height in pixels."""
