@@ -1,10 +1,12 @@
-"""entrypoint delegating to modular package CLI."""
+"""Entrypoint launching the Textual UI."""
 
-from yt_downloader import run_cli
+from yt_downloader.tui import DownloaderApp
 
 
 def main():
-    run_cli()
+    # Launch the Textual UI
+    app = DownloaderApp()
+    app.run()
 
 
 if __name__ == "__main__":

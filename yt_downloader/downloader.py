@@ -5,8 +5,20 @@ from __future__ import annotations
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Optional, Any, List, Dict
-from yt_dlp.utils import DownloadError
+import time
+import os
+import shutil
+import glob
+from typing import Optional, Any, List, Dict, Callable
+from yt_dlp.utils import sanitize_filename
+from yt_dlp.utils import (
+    DownloadError,
+    ExtractorError,
+    GeoRestrictedError,
+    UnavailableVideoError,
+    UnsupportedError,
+    YoutubeDLError,
+)
 
 import yt_dlp
 from rich.progress import Progress, BarColumn, DownloadColumn, TimeRemainingColumn  # type: ignore
@@ -24,6 +36,7 @@ from datetime import datetime
 RETRIES = 3  # Centralized retry constant
 
 # --- Helper components (refactored architecture) ---------------------------------
+
 
 class FormatSelector:
     """
@@ -53,7 +66,9 @@ class FormatSelector:
             return steps[0], reasons
         for q in self.quality_order:
             height = self._q_to_h(q)
-            steps.append(f"bestvideo[height={height}][ext=mp4]+bestaudio[ext=m4a]/best[height={height}]")
+            steps.append(
+                f"bestvideo[height={height}]+bestaudio/best[height={height}][vcodec!=none]"
+            )
             reasons.append(f"target_height_{height}")
         # generic fallbacks
         steps.append("bestvideo+bestaudio")
@@ -78,11 +93,21 @@ class CaptionOrchestrator:
     """
 
     def __init__(self, service_factory):
-        self._make_service = service_factory  # expects (languages:list[str]) -> CaptionsService
+        self._make_service = (
+            service_factory  # expects (languages:list[str]) -> CaptionsService
+        )
 
-    def run(self, video, output_dir: Path, info: dict, want_manual: bool, want_auto: bool,
-            languages: list[str]) -> list[CaptionTrack]:
+    def run(
+        self,
+        video,
+        output_dir: Path,
+        info: dict,
+        want_manual: bool,
+        want_auto: bool,
+        languages: list[str],
+    ) -> list[CaptionTrack]:
         from .captions import CaptionsService  # local import to avoid cycles
+
         tracks: list[CaptionTrack] = []
         service = self._make_service(languages)
         # Leverage existing service obtain (already has graceful fallback logic)
@@ -98,11 +123,18 @@ class VideoResult:
     quality: Optional[str] = None
     failure_reason: Optional[str] = None
     fallback_applied: bool = False
+    duration: Optional[float] = None
+    resolution: Optional[str] = None
+    filepath: Optional[str] = None
 
 
 class PlaylistDownloader:
-    def __init__(self, config: AppConfig):
+    def __init__(
+        self, config: AppConfig, plugin_manager: Optional[PluginManager] = None, progress_callback: Optional[Callable[[float], None]] = None
+    ):
         self.config = config
+        self.plugin_manager = plugin_manager
+        self.progress_callback = progress_callback
         self.progress = Progress(
             BarColumn(),
             "[progress.percentage]{task.percentage:>3.0f}%",
@@ -148,7 +180,7 @@ class PlaylistDownloader:
         """
         if self._is_single_video_url(playlist_url):
             playlist_url = self._normalize_video_url(playlist_url)
-            single_result = self.download_video(playlist_url, audio_only=audio_only)
+            single_result = self.download_video(playlist_url, audio_only=audio_only, captions=captions, captions_auto=captions_auto, caption_langs=caption_langs)
             return [single_result] if single_result else []
         # New session assembly
         session = PlaylistSession(
@@ -161,8 +193,12 @@ class PlaylistDownloader:
         )
         # Expose session for incremental counting in worker callbacks
         self.last_session = session
+        if self.plugin_manager:
+            self.plugin_manager.on_playlist_start(session)
+
         results: List[VideoResult] = []
         effective_audio = session.audio_only
+        log = get_logger()
         try:
             # Use yt-dlp to extract playlist info
             ydl_opts: dict[str, Any] = {
@@ -173,11 +209,15 @@ class PlaylistDownloader:
 
             with yt_dlp.YoutubeDL(ydl_opts) as ydl:  # type: ignore[arg-type]
                 playlist_info = ydl.extract_info(playlist_url, download=False)
+                log.info(f"Extracted playlist info for {playlist_url}: entries={len(playlist_info.get('entries', []))}")
                 if not playlist_info:
+                    log.error(f"No playlist info extracted for {playlist_url}")
                     return []
                 # If this is actually a single video extraction (no entries), treat it as such
                 if "entries" not in playlist_info:
-                    single_result = self.download_video(playlist_url, audio_only=audio_only)
+                    single_result = self.download_video(
+                        playlist_url, audio_only=audio_only
+                    )
                     return [single_result] if single_result else []
 
             out_dir = self.config.output_dir
@@ -213,6 +253,7 @@ class PlaylistDownloader:
                 )
             # Filtering (by index_range & filters terms on title placeholder for now)
             items = apply_filters(items, filters, index_range)
+            log.info(f"Filtered to {len(items)} videos for download")
 
             with (
                 self.progress,
@@ -250,19 +291,44 @@ class PlaylistDownloader:
             # Backfill counts if incremental path was skipped (should rarely happen)
             if session.counts["total"] == 0:
                 session.counts["total"] = len(results)
-                session.counts["success"] = sum(1 for r in results if r.status == "success")
-                session.counts["failed"] = sum(1 for r in results if r.status == "failed")
+                session.counts["success"] = sum(
+                    1 for r in results if r.status == "success"
+                )
+                session.counts["failed"] = sum(
+                    1 for r in results if r.status == "failed"
+                )
                 session.counts["skipped"] = 0
-                session.counts["fallbacks"] = sum(1 for r in results if r.fallback_applied)
+                session.counts["fallbacks"] = sum(
+                    1 for r in results if r.fallback_applied
+                )
             manifest.save()
-        except Exception as e:  # broad catch
+            if self.plugin_manager:
+                self.plugin_manager.on_playlist_complete(session)
+        except UnavailableVideoError as e:
+            log.error(f"Playlist unavailable: {playlist_url}: {e}")
             from rich import print as rprint
 
-            rprint(f"[bold red]Fatal playlist error: {e}[/bold red]")
+            rprint(f"[bold red]Playlist unavailable: {e}[/bold red]")
+        except ExtractorError as e:
+            log.error(f"Failed to extract playlist info for {playlist_url}: {e}")
+            from rich import print as rprint
+
+            rprint(f"[bold red]Failed to extract playlist: {e}[/bold red]")
+        except YoutubeDLError as e:
+            log.error(f"yt-dlp error processing playlist {playlist_url}: {e}")
+            from rich import print as rprint
+
+            rprint(f"[bold red]yt-dlp error: {e}[/bold red]")
+        except Exception as e:
+            log.error(f"Unexpected error processing playlist {playlist_url}: {e}")
+            from rich import print as rprint
+
+            rprint(f"[bold red]Unexpected playlist error: {e}[/bold red]")
         return results  # session retained internally (future: return session)
 
     def download_video(
-        self, video_url: str, audio_only: Optional[bool] = None
+        self, video_url: str, audio_only: Optional[bool] = None,
+        captions: bool = False, captions_auto: bool = False, caption_langs: Optional[list[str]] = None
     ) -> Optional[VideoResult]:
         """Download a single YouTube video (no playlist context).
 
@@ -272,10 +338,31 @@ class PlaylistDownloader:
             URL of the YouTube video.
         audio_only: Optional[bool]
             Override config audio_only for this call.
+        captions: bool
+            Whether to download manual captions.
+        captions_auto: bool
+            Whether to download auto captions.
+        caption_langs: Optional[list[str]]
+            List of caption languages to try.
         """
+        log = get_logger()
         video_url = self._normalize_video_url(video_url)
         effective_audio = self.config.audio_only if audio_only is None else audio_only
-        return self._process_video(video_url, self.config.output_dir, effective_audio)
+        vr = self._process_video(video_url, self.config.output_dir, effective_audio)
+        if vr and vr.status == "success":
+            video_id = video_url.split('v=')[1].split('&')[0] if 'v=' in video_url else video_url.split('/')[-1].split('?')[0]
+            video = VideoItem(
+                index=1,
+                video_id=video_id,
+                title=vr.title,
+                preferred_quality=self.config.preferred(),
+                audio_only=effective_audio,
+            )
+            if captions or captions_auto:
+                cap_service = CaptionsService(self.config.output_dir, caption_langs or ["en"])
+                tracks = cap_service.obtain(video, captions, captions_auto)
+                log.info(f"Downloaded {len(tracks)} caption tracks for single video {video_id}")
+        return vr
 
     # --- URL helpers -------------------------------------------------
     def _is_single_video_url(self, url: str) -> bool:
@@ -310,6 +397,9 @@ class PlaylistDownloader:
             video.status = "success"
             video.selected_quality = vr.quality
             video.fallback_applied = vr.fallback_applied
+            video.duration = vr.duration
+            video.resolution = vr.resolution
+            video.filepath = vr.filepath
             # Capture size if available from last selected format
             if getattr(self, "_last_selected_format", None):
                 sf = self._last_selected_format
@@ -331,6 +421,8 @@ class PlaylistDownloader:
         if sess is not None:
             if video.status == "success":
                 sess.counts["success"] += 1
+                if self.plugin_manager:
+                    self.plugin_manager.on_video_downloaded(video)
             elif video.status == "failed":
                 sess.counts["failed"] += 1
             elif video.status == "skipped":
@@ -352,114 +444,206 @@ class PlaylistDownloader:
           4. Verify presence (basic: file exists & non-zero; format meta had video when expected)
           5. Captions (handled in enriched path)
         """
-        import time
         log = get_logger()
 
-        attempts = 0
-        last_exc: Exception | None = None
-        info: dict[str, Any] | None = None
-        while attempts < RETRIES:
+        for attempt in range(self.config.retry_attempts):
             try:
                 extract_opts: dict[str, Any] = {
                     "quiet": True,
                     "no_warnings": True,
                     "skip_unavailable_fragments": True,
-                    "retries": RETRIES,
-                    "fragment_retries": RETRIES,
+                    "retries": self.config.retry_attempts,
+                    "fragment_retries": self.config.retry_attempts,
                     "extract_flat": False,
                 }
                 with yt_dlp.YoutubeDL(extract_opts) as ydl:  # type: ignore[arg-type]
                     info = ydl.extract_info(url, download=False)
                 if not info:
-                    return VideoResult(url=url, title=url, status="failed", failure_reason="No metadata")
-                break
+                    raise DownloadError("No metadata extracted")
+
+                title_raw = info.get("title")
+                title = title_raw if isinstance(title_raw, str) and title_raw else url
+                formats = info.get("formats") or []
+                log.info(f"Found {len(formats)} formats for {url}")
+                log.info(f"All format ids: {[f.get('format_id') for f in formats]}")
+                if formats:
+                    format_summary = [
+                        f"{f.get('format_id', 'unknown')} h={f.get('height', 'N/A')} vcodec={f.get('vcodec', 'none')} acodec={f.get('acodec', 'none')}"
+                        for f in formats[:5]
+                    ]
+                    log.info(f"First 5 formats: {format_summary}")
+                if not formats:
+                    return VideoResult(
+                        url=url,
+                        title=title,
+                        status="failed",
+                        failure_reason="No formats",
+                    )
+
+                heights = [
+                    f.get("height") for f in formats if isinstance(f.get("height"), int)
+                ]
+                log.info(f"Video heights: {heights}")
+
+                fs = FormatSelector(self.config.quality_order, audio_only)
+                format_string, reasons = fs.build()
+                log.info(
+                    "Format selector chain: %s (reasons=%s)", format_string, reasons
+                )
+
+                outtmpl = f"{output_path}/%(title)s.%(ext)s"
+                download_opts: dict[str, Any] = {
+                    "quiet": True,
+                    "no_warnings": True,
+                    "outtmpl": outtmpl,
+                    "progress_hooks": [self._yt_dlp_progress_hook],
+                    "retries": self.config.retry_attempts,
+                    "fragment_retries": self.config.retry_attempts,
+                    "skip_unavailable_fragments": True,
+                    "format": format_string,
+                }
+                ffmpeg_available = shutil.which('ffmpeg') is not None
+                if audio_only:
+                    if ffmpeg_available:
+                        download_opts.update(
+                            {
+                                "postprocessors": [
+                                    {
+                                        "key": "FFmpegExtractAudio",
+                                        "preferredcodec": "mp3",
+                                        "preferredquality": "192",
+                                    }
+                                ],
+                                "prefer_ffmpeg": True,
+                            }
+                        )
+                    else:
+                        log.warning("FFmpeg not found. Audio extraction may fail.")
+                else:
+                    if ffmpeg_available:
+                        download_opts.update({"merge_output_format": "mp4", "prefer_ffmpeg": True})
+                    else:
+                        log.warning("FFmpeg not found. Video will be downloaded in original format without forced conversion.")
+
+                est_size = 0
+                for f in formats:
+                    if f.get("vcodec") not in (None, "none"):
+                        est_size = f.get("filesize") or f.get("filesize_approx") or 0
+                        break
+                task_id = self.progress.add_task(
+                    description=title[:50], total=est_size, visible=True
+                )
+                self._current_task_id = task_id
+
+                with yt_dlp.YoutubeDL(download_opts) as ydl:  # type: ignore[arg-type]
+                    ydl.download([url])
+                log.info(f"yt-dlp download completed for {url}")
+                sanitized_title = sanitize_filename(title)
+                pattern = f"{output_path}/{sanitized_title}.*"
+                files = glob.glob(pattern)
+                if files:
+                    actual_path = files[0]
+                    log.info(f"Output file: {actual_path}, size: {os.path.getsize(actual_path)} bytes")
+                else:
+                    log.warning("Output file not found")
+
+                self.progress.update(task_id, visible=False)
+
+                fallback_applied = False
+                if not audio_only:
+                    pref_h = self._quality_to_height(self.config.preferred())
+                    if pref_h not in heights:
+                        fallback_applied = True
+
+                derived_quality = (
+                    "audio"
+                    if audio_only
+                    else self._format_to_quality(
+                        {
+                            "height": max(
+                                [h for h in heights if isinstance(h, int)], default=0
+                            )
+                        },
+                        audio_only,
+                    )
+                )
+                resolution = (
+                    f"{info.get('width')}x{info.get('height')}"
+                    if info.get("width") and info.get("height")
+                    else None
+                )
+
+                return VideoResult(
+                    url=url,
+                    title=title,
+                    status="success",
+                    quality=derived_quality,
+                    fallback_applied=fallback_applied,
+                    duration=info.get("duration"),
+                    resolution=resolution,
+                    filepath=actual_path if 'actual_path' in locals() else None,
+                )
+
+            except UnavailableVideoError as e:
+                log.warning(f"Video unavailable for {url}: {e}")
+                return VideoResult(
+                    url=url,
+                    title=url,
+                    status="failed",
+                    failure_reason=f"Video unavailable: {e}",
+                )
+            except GeoRestrictedError as e:
+                log.warning(f"Video geo-restricted for {url}: {e}")
+                return VideoResult(
+                    url=url,
+                    title=url,
+                    status="failed",
+                    failure_reason=f"Geo-restricted: {e}",
+                )
+            except UnsupportedError as e:
+                log.warning(f"Unsupported video format for {url}: {e}")
+                return VideoResult(
+                    url=url,
+                    title=url,
+                    status="failed",
+                    failure_reason=f"Unsupported format: {e}",
+                )
+            except ExtractorError as e:
+                log.warning(f"Extractor error for {url}: {e}")
+                return VideoResult(
+                    url=url,
+                    title=url,
+                    status="failed",
+                    failure_reason=f"Extractor error: {e}",
+                )
+            except DownloadError as e:
+                log.warning(f"Download failed for {url} on attempt {attempt + 1}: {e}")
+                if attempt < self.config.retry_attempts - 1:
+                    time.sleep(self.config.timeout_seconds)
+                else:
+                    return VideoResult(
+                        url=url, title=url, status="failed", failure_reason=str(e)
+                    )
+            except YoutubeDLError as e:
+                log.error(f"yt-dlp error for {url}: {e}")
+                return VideoResult(
+                    url=url,
+                    title=url,
+                    status="failed",
+                    failure_reason=f"yt-dlp error: {e}",
+                )
             except Exception as e:
-                last_exc = e
-                attempts += 1
-                if attempts >= RETRIES:
-                    break
-                time.sleep(1 * attempts)
-        if info is None:
-            return VideoResult(url=url, title=url, status="failed", failure_reason=f"MetadataError: {last_exc}")
+                log.error(f"An unexpected error occurred while processing {url}: {e}")
+                return VideoResult(
+                    url=url,
+                    title=url,
+                    status="failed",
+                    failure_reason=f"Unexpected error: {e}",
+                )
 
-        title_raw = info.get("title")
-        title = title_raw if isinstance(title_raw, str) and title_raw else url
-        formats = info.get("formats") or []
-        if not formats:
-            return VideoResult(url=url, title=title, status="failed", failure_reason="No formats")
-        # Pre-compute heights list once (used for fallback and quality derivation)
-        heights = [f.get("height") for f in formats if isinstance(f.get("height"), int)]
-
-        # Build deterministic format selector
-        fs = FormatSelector(self.config.quality_order, audio_only)
-        format_string, reasons = fs.build()
-        log.debug("Format selector chain: %s (reasons=%s)", format_string, reasons)
-
-        # Download
-        outtmpl = f"{output_path}/%(title)s.%(ext)s"
-        download_opts: dict[str, Any] = {
-            "quiet": True,
-            "no_warnings": True,
-            "outtmpl": outtmpl,
-            "progress_hooks": [self._yt_dlp_progress_hook],
-            "retries": RETRIES,
-            "fragment_retries": RETRIES,
-            "skip_unavailable_fragments": True,
-            "format": format_string,
-        }
-        if audio_only:
-            download_opts.update({
-                "postprocessors": [{
-                    "key": "FFmpegExtractAudio",
-                    "preferredcodec": "mp3",
-                    "preferredquality": "192",
-                }],
-                "prefer_ffmpeg": True,
-            })
-        else:
-            download_opts.update({"merge_output_format": "mp4"})
-
-        # Progress task (approx size from largest format with video in chain if available)
-        est_size = 0
-        for f in formats:
-            if f.get("vcodec") not in (None, "none"):
-                est_size = f.get("filesize") or f.get("filesize_approx") or 0
-                break
-        task_id = self.progress.add_task(description=title[:50], total=est_size, visible=True)
-        self._current_task_id = task_id
-        try:
-            with yt_dlp.YoutubeDL(download_opts) as ydl:  # type: ignore[arg-type]
-                ydl.download([url])
-        except DownloadError as e:
-            self.progress.update(task_id, visible=False)
-            return VideoResult(url=url, title=title, status="failed", failure_reason=f"DownloadError: {e}")
-
-        self.progress.update(task_id, visible=False)
-
-        # Basic post verification (no heavy ffprobe dependency):
-        # If non-audio request and no container likely produced (could refine by globbing), we record fallback.
-        fallback_applied = False
-        if not audio_only:
-            # If formats list has no combined indicator and original chain required fallback
-            # we approximate fallback detection by absence of a format exactly matching preferred height.
-            pref_h = self._quality_to_height(self.config.preferred())
-            # heights already precomputed above
-            if pref_h not in heights:
-                fallback_applied = True
-
-        # Derive quality from best available format referencing target heights
-        derived_quality = "audio" if audio_only else self._format_to_quality(
-            {"height": max([h for h in heights if isinstance(h, int)], default=0)},
-            audio_only
-        )
         return VideoResult(
-            url=url,
-            title=title,
-            status="success",
-            quality=derived_quality,
-            fallback_applied=fallback_applied,
+            url=url, title=url, status="failed", failure_reason="Max retries reached"
         )
-
 
     def _quality_to_height(self, quality: str) -> int:
         """Convert quality string to height in pixels."""
@@ -508,10 +692,15 @@ class PlaylistDownloader:
                     self.progress.update(
                         self._current_task_id, completed=downloaded, total=total
                     )
+                    if self.progress_callback:
+                        progress = (downloaded / total) * 100
+                        self.progress_callback(progress)
             elif d["status"] == "finished":
                 self.progress.update(
                     self._current_task_id, completed=d.get("total_bytes", 0)
                 )
+                if self.progress_callback:
+                    self.progress_callback(100)
 
     def _progress_callback(
         self, stream, chunk, bytes_remaining

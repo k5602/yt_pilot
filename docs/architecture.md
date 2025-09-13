@@ -7,17 +7,16 @@
 - `naming.py`: Filename template expansion and sanitization.
 - `filtering.py`: Title substring OR filtering and inclusive index range slicing.
 - `manifest.py`: Load/update manifest JSON, compute skip logic for resume.
-- `captions.py`: Manual and automatic caption retrieval (selection, SRT/VTT style content production placeholder).
+- `captions.py`: Manual and automatic caption retrieval (selection, SRT/VTT style content production).
 - `planner.py`: Dry-run plan object generation (lightweight representation without network calls currently placeholder for future expansion).
 - `downloader.py`: Orchestrates playlist vs single video downloads, integrates naming, filtering, captions, manifest, batching, and force behavior.
 - `reporting.py`: Builds structured summary dictionaries; future extended detailed reporting hooks.
-- `cli.py`: Argument parsing, validation, dry-run path, session orchestration across multiple targets, structured JSON summary output.
 - `plugins.py`: Minimal plugin manager allowing future extensibility hooks post processing.
 - `logging_utils.py`: Central logger factory.
 
 ## Data Flow (Happy Path)
 
-1. CLI parses flags -> builds AppConfig.
+1. TUI collects user input -> builds AppConfig.
 2. For each URL target: decide playlist vs single video.
 3. Playlist path: filtering + manifest skip -> concurrent downloads -> captions selection -> filename templating -> manifest update.
 4. Results aggregated; optional JSON structured summary printed.

@@ -19,20 +19,23 @@ dependencies = [
     "yt-dlp>=2025.9.5",
     "youtube-transcript-api>=1.2.2",
     "rich>=14.1.0",
+    "textual>=6.1.0",
+    "pyperclip>=1.8.2",
 ]
 
 [project.optional-dependencies]
 dev = ["pytest>=8.0.0", "jsonschema>=4.21.0"]
-
 [project.scripts]
-yt-downloader = "yt_downloader.cli:run_cli"
+yt-pilot = "yt_downloader:main"
 
 [tool.setuptools.packages.find]
 where = ["."]
 include = ["yt_downloader*"]
 
+[tool.setuptools.package-data]
+yt_downloader = ["*.css"]
+
 [tool.pytest.ini_options]
-# Mirror pytest.ini for single-source config (pyproject precedence optional)
 addopts = "-q"
 python_files = "test_*.py"
 python_classes = "Test*"

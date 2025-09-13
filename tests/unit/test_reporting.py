@@ -1,3 +1,4 @@
+import json
 from datetime import datetime
 from yt_downloader.reporting import build_session_report
 from yt_downloader.models import PlaylistSession, VideoItem
@@ -29,18 +30,19 @@ def make_session():
 def test_build_session_report_shape():
     s = make_session()
     rep = build_session_report(s)
+    rep_dict = json.loads(rep.to_json())
     for key in [
-        "schemaVersion",
-        "playlistUrl",
-        "sessionId",
+        "schema_version",
+        "playlist_url",
+        "session_id",
         "started",
         "ended",
-        "qualityOrder",
+        "quality_order",
         "videos",
     ]:
-        assert key in rep
+        assert key in rep_dict
     # failures and fallbacks lists
-    assert len(rep["failures"]) == 1
-    assert rep["failures"][0]["videoId"] == "v2"
-    assert len(rep["fallbacks"]) == 1
-    assert rep["fallbacks"][0]["videoId"] == "v3"
+    assert len(rep_dict["failures"]) == 1
+    assert rep_dict["failures"][0]["videoId"] == "v2"
+    assert len(rep_dict["fallbacks"]) == 1
+    assert rep_dict["fallbacks"][0]["videoId"] == "v3"

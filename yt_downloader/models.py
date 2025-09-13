@@ -30,6 +30,9 @@ class VideoItem:
     fallback_applied: bool = False
     retries: int = 0
     size_bytes: Optional[int] = None
+    duration: Optional[float] = None
+    resolution: Optional[str] = None
+    filepath: Optional[str] = None
     captions: List[CaptionTrack] = field(default_factory=list)
     filename: Optional[str] = None
 

@@ -64,42 +64,37 @@ def test_fetch_manual_real_implementation():
     with tempfile.TemporaryDirectory() as temp_dir:
         service = CaptionsService(Path(temp_dir), ["en"])
         video = make_video()
-        
+
         # Mock yt-dlp and urllib to simulate successful subtitle extraction
         mock_subtitle_data = "1\n00:00:01,000 --> 00:00:03,000\nHello world\n\n"
-        
-        with patch('yt_dlp.YoutubeDL') as mock_ydl_class:
+
+        with patch("yt_dlp.YoutubeDL") as mock_ydl_class:
             mock_ydl = MagicMock()
             mock_ydl_class.return_value.__enter__.return_value = mock_ydl
-            
+
             # Mock extract_info to return subtitle information
             mock_ydl.extract_info.return_value = {
                 "subtitles": {
-                    "en": [
-                        {
-                            "url": "http://example.com/subtitle.srt",
-                            "ext": "srt"
-                        }
-                    ]
+                    "en": [{"url": "http://example.com/subtitle.srt", "ext": "srt"}]
                 }
             }
-            
+
             # Mock urllib.request.urlopen
-            with patch('urllib.request.urlopen') as mock_urlopen:
+            with patch("urllib.request.urlopen") as mock_urlopen:
                 mock_response = MagicMock()
-                mock_response.read.return_value = mock_subtitle_data.encode('utf-8')
+                mock_response.read.return_value = mock_subtitle_data.encode("utf-8")
                 mock_urlopen.return_value.__enter__.return_value = mock_response
-                
+
                 # Test the method
                 track = service.fetch_manual(video)
-                
+
                 # Verify the result
                 assert track is not None
                 assert track.video_id == "vid"
                 assert track.language == "en"
                 assert track.kind == "manual"
                 assert track.format == "srt"
-                
+
                 # Verify the caption file was created
                 caption_path = Path(track.path)
                 assert caption_path.exists()
@@ -112,7 +107,7 @@ def test_fetch_manual_vtt_conversion():
     with tempfile.TemporaryDirectory() as temp_dir:
         service = CaptionsService(Path(temp_dir), ["en"])
         video = make_video()
-        
+
         # Mock VTT content that needs conversion
         mock_vtt_data = """WEBVTT
 
@@ -122,36 +117,31 @@ Hello world
 00:00:04.000 --> 00:00:06.000
 Second subtitle
 """
-        
-        with patch('yt_dlp.YoutubeDL') as mock_ydl_class:
+
+        with patch("yt_dlp.YoutubeDL") as mock_ydl_class:
             mock_ydl = MagicMock()
             mock_ydl_class.return_value.__enter__.return_value = mock_ydl
-            
+
             # Mock extract_info to return VTT subtitle information
             mock_ydl.extract_info.return_value = {
                 "subtitles": {
-                    "en": [
-                        {
-                            "url": "http://example.com/subtitle.vtt",
-                            "ext": "vtt"
-                        }
-                    ]
+                    "en": [{"url": "http://example.com/subtitle.vtt", "ext": "vtt"}]
                 }
             }
-            
+
             # Mock urllib.request.urlopen
-            with patch('urllib.request.urlopen') as mock_urlopen:
+            with patch("urllib.request.urlopen") as mock_urlopen:
                 mock_response = MagicMock()
-                mock_response.read.return_value = mock_vtt_data.encode('utf-8')
+                mock_response.read.return_value = mock_vtt_data.encode("utf-8")
                 mock_urlopen.return_value.__enter__.return_value = mock_response
-                
+
                 # Test the method
                 track = service.fetch_manual(video)
-                
+
                 # Verify the result
                 assert track is not None
                 assert track.format == "srt"
-                
+
                 # Verify the caption file was created and VTT was converted to SRT
                 caption_path = Path(track.path)
                 assert caption_path.exists()

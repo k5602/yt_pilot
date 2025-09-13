@@ -7,22 +7,15 @@ Modular YouTube Playlist & Single Video Downloader supporting playlist batch ope
 
 ## Features
 
-- Playlist & single video URLs (mixed targets)
-- Parallel downloads (--jobs)
-- Quality preference & fallback order
-- Audio-only extraction (-a / --audio)
-- Resume with manifest (--resume)
-- Force re-download (--force)
-- Dry-run planning (--dry-run) with optional JSON output (--report-format json)
-- JSON report summary output & structured logging
-- Captions: manual (--captions) + auto fallback (--captions-auto) with language preference (--caption-langs "en,es")
-- Manual subtitle language override (--sub-langs "en,es") for yt-dlp native subtitle fetching (takes precedence for manual subtitles)
-- Title filtering (repeatable --filter substr)
-- Index slicing (--index-range start:end inclusive)
-- Filename templating (--naming-template)
-- Interactive confirmation (--interactive)
-- Plugin manager scaffold for post-processing
-- Powered by yt-dlp for robust YouTube API compatibility
+- **Textual UI:** An intuitive terminal-based graphical interface for configuring and managing downloads with real-time progress tracking and logging.
+- **Configuration Management:** Save and load your preferred settings from JSON configuration files.
+- **Plugin System:** Extensible architecture allowing custom plugins to enhance functionality.
+- **Detailed Reporting:** Automatic generation of structured JSON reports for each download session.
+- **Comprehensive Download Options:** Support for playlists and single videos, parallel downloads, quality selection with fallback, audio-only mode, resume functionality, and force re-download.
+- **Caption Support:** Download manual captions with automatic fallback to ASR-generated captions, configurable language preferences.
+- **Advanced Filtering:** Title-based filtering, index range selection, and custom filename templating.
+- **Dry Run Mode:** Preview download plans without performing actual downloads.
+- **Powered by yt-dlp:** Leverages yt-dlp for reliable YouTube and other video platform compatibility.
 
 ## Installation
 
@@ -39,81 +32,55 @@ pip install dist/yt_downloader-*.whl
 
 After installation a console script `yt-downloader` is available.
 
-## CLI Usage
+## Usage
 
-yt-downloader URL [URL ...] [options]
-
-```bash
-yt-downloader URL [URL ...] [options]
-```
-
-### Common Options
-
-| Flag                 | Description                                                                                                             |
-| -------------------- | ----------------------------------------------------------------------------------------------------------------------- |
-| -q / --quality       | Primary preferred quality (fallback chain auto-extends)                                                                 |
-| -a / --audio         | Audio-only mode                                                                                                         |
-| -j / --jobs          | Max parallel worker threads                                                                                             |
-| --dry-run            | Plan only; no downloads                                                                                                 |
-| --report-format json | Emit JSON session summary (dry-run prints plan JSON if also --dry-run)                                                  |
-| --filter SUBSTR      | Case-insensitive title substring filter (repeatable OR)                                                                 |
-| --index-range s:e    | 1-based inclusive slice (e.g. 5:10, :20, 10:)                                                                           |
-| --resume             | Skip already successful items found in manifest.json                                                                    |
-| --force              | Re-download even if manifest marks success                                                                              |
-| --captions           | Download manual captions if available                                                                                   |
-| --captions-auto      | Allow automatic (ASR) captions if manual missing (or when only auto desired)                                            |
-| --caption-langs CSV  | Caption language preference order for manual/auto selection (default: en)                                               |
-| --sub-langs CSV      | Override manual subtitle download languages (yt-dlp native). Takes precedence over --caption-langs for manual subtitles |
-| --naming-template T  | Filename pattern tokens: {index},{title},{quality},{video_id},{date},{audio_only}                                       |
-| --interactive        | Ask confirmation per target                                                                                             |
+Launch the Textual UI:
 
 ### Examples
 
-Dry-run with JSON plan:
-yt-downloader --dry-run --report-format json "https://youtube.com/playlist?list=PL123" > plan.json
+Launch the TUI:
 
 ```bash
-yt-downloader --dry-run --report-format json "<https://youtube.com/playlist?list=PL123>" > plan.json
+yt-downloader
 ```
 
-Download a single video with captions (manual then auto fallback):
-yt-downloader --captions --captions-auto "https://www.youtube.com/watch?v=VIDEO_ID"
+The TUI provides an intuitive interface for configuring and starting downloads. Use the tabs to set options like quality, audio mode, captions, and advanced settings. Click "Dry Run" to preview the download plan or "Start Download" to begin.
 
-```bash
-yt-downloader --captions --captions-auto "<https://www.youtube.com/watch?v=VIDEO_ID>"
-```
+## Configuration
 
-Playlist subset, filter titles containing "python" across indices 10–25, audio only:
-yt-downloader -a --filter python --index-range 10:25 "https://youtube.com/playlist?list=PL123"
+You can save your preferred settings to a JSON file and use it with the `--config` flag. To save your current settings, use the `--save-config` flag.
 
-```bash
-yt-downloader -a --filter python --index-range 10:25 "<https://youtube.com/playlist?list=PL123>"
-```
+Example `config.json`:
 
-Force re-download ignoring previous successes:
-yt-downloader --force --resume "https://youtube.com/playlist?list=PL123"
-
-```bash
-yt-downloader --force --resume "<https://youtube.com/playlist?list=PL123>"
-```
-
-Custom naming template:
-yt-downloader --naming-template "{index:03d}-{title}-{quality}" URL
-
-```bash
-yt-downloader --naming-template "{index:03d}-{title}-{quality}" URL
+```json
+{
+  "quality_order": ["1080p", "720p"],
+  "max_concurrency": 8,
+  "audio_only": false,
+  "output_dir": "/path/to/downloads"
+}
 ```
 
 ## Reporting
 
-When `--report-format json` a final summary line is emitted to stdout as JSON:
+When `--report-format json` is used, a detailed `report.json` file is generated in the output directory for each download session. This file contains information about the downloaded videos, including their quality, size, duration, and any errors that occurred.
 
-```json
-{ "summary": { "targets": 1, "totalVideos": 12, "success": 12, "failed": 0 } }
+## Plugins
+
+YouTube Pilot supports plugins to extend its functionality. Plugins are Python files that are loaded from `~/.config/yt-pilot/plugins`. To create a plugin, you need to create a Python file that defines a class that inherits from the `Plugin` protocol.
+
+Example plugin:
+
+```python
+from yt_downloader.plugins import Plugin
+
+class MyPlugin(Plugin):
+    name = "MyPlugin"
+
+    def on_video_downloaded(self, context):
+        video = context["video"]
+        print(f"Downloaded video: {video.title}")
 ```
-
-Integrations can parse this line for automation. Per-target lightweight report files are written to the output directory as `report.json` (single target) or `report-<n>.json` when multiple targets are processed.
-(Full detailed per-video report plumbing is prepared in `reporting.py`).
 
 ## Architecture Overview
 
