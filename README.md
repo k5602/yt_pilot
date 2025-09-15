@@ -4,6 +4,11 @@ A high-performance Python utility for downloading YouTube playlists with paralle
 Modular YouTube Playlist & Single Video Downloader supporting playlist batch operations, captions (manual + auto), resume via manifest, dry-run planning, reporting, quality fallback, audio-only mode, interactive confirmations, filtering, filename templating, and an extensible plugin hook system.
 
 **Built with yt-dlp** for reliable YouTube downloads and support for thousands of video sites.
+## Preview
+
+<img width="1920" height="1080" alt="Screenshot_20250915_154121" src="https://github.com/user-attachments/assets/e2b01768-879a-49d2-a015-616283cffb79" />
+
+<img width="1920" height="1080" alt="Screenshot_20250915_154207" src="https://github.com/user-attachments/assets/900b0ef5-b550-47b3-8146-4a6a43dbd328" />
 
 ## Features
 
