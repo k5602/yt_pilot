@@ -98,4 +98,4 @@ pytest -q
 
 MIT - see `LICENSE`.
 
-**Developed with ❤️ by [Khaled]**
+**Developed with ❤️ by Khaled**
